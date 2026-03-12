@@ -26,6 +26,17 @@ from pathlib import Path
 
 from config import SB_DIR, SB_CONFIG, SB_CONFIG_10, SB_CONFIG_11, SB_BIN, MANAGER_DIR
 
+
+def _version_gte(ver: str, target: str) -> bool:
+    """Check if ver >= target using numeric comparison (e.g. '1.13' >= '1.12')."""
+    try:
+        v = [int(x) for x in ver.split(".")]
+        t = [int(x) for x in target.split(".")]
+        return v >= t
+    except (ValueError, AttributeError):
+        return False
+
+
 # ==================== Constants ====================
 
 GITHUB_API = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
@@ -382,39 +393,67 @@ def build_singbox_config(
     version: str = "1.11",
 ) -> dict:
     """Build a sing-box configuration dictionary."""
-    config = {
-        "log": {"level": "info", "timestamp": True},
-        "dns": {
+
+    # DNS format changed in sing-box 1.12
+    if _version_gte(version, "1.12"):
+        dns_config = {
+            "servers": [
+                {"tag": "google", "type": "tls", "server": "8.8.8.8"},
+                {"tag": "local", "type": "udp", "server": "223.5.5.5"},
+            ],
+        }
+    else:
+        dns_config = {
             "servers": [
                 {"tag": "google", "address": "tls://8.8.8.8"},
                 {"tag": "local", "address": "223.5.5.5", "detour": "direct"},
             ],
-        },
+        }
+
+    # sing-box 1.11+ deprecated dns outbound, 1.13 removed it → use hijack-dns action
+    if _version_gte(version, "1.11"):
+        dns_route_rule = {"protocol": "dns", "action": "hijack-dns"}
+    else:
+        dns_route_rule = {"protocol": "dns", "outbound": "dns-out"}
+
+    config = {
+        "log": {"level": "info", "timestamp": True},
+        "dns": dns_config,
         "inbounds": [],
         "outbounds": [
             {"type": "direct", "tag": "direct"},
             {"type": "block", "tag": "block"},
         ],
-        "route": {
-            "rules": [
-                {"protocol": "dns", "outbound": "dns-out"},
+        "route": dict(
+            **{"default_domain_resolver": "google"} if _version_gte(version, "1.12") else {},
+            rules=[
+                dns_route_rule,
                 {"ip_is_private": True, "outbound": "direct"},
             ],
-            "final": "direct",
-        },
+            final="direct",
+        ),
     }
 
     # Clash API for traffic monitoring
     if enable_clash_api:
-        config["experimental"] = {
-            "clash_api": {
-                "external_controller": "127.0.0.1:9090",
-                "store_selected": True,
-            },
-        }
+        if _version_gte(version, "1.12"):
+            config["experimental"] = {
+                "cache_file": {"enabled": True},
+                "clash_api": {
+                    "external_controller": "127.0.0.1:9090",
+                },
+            }
+        else:
+            config["experimental"] = {
+                "clash_api": {
+                    "external_controller": "127.0.0.1:9090",
+                    "store_selected": True,
+                },
+            }
 
-    # DNS outbound
-    config["outbounds"].append({"type": "dns", "tag": "dns-out"})
+    # DNS outbound only needed for < 1.11
+    if not _version_gte(version, "1.11"):
+        config["outbounds"].append({"type": "dns", "tag": "dns-out"})
 
     # ===== VLESS Reality inbound (always enabled) =====
     vless_inbound = {
@@ -491,7 +530,7 @@ def build_singbox_config(
         config["inbounds"].append(tuic_inbound)
 
     # ===== AnyTLS inbound (optional, 1.11+ only) =====
-    if anytls_port > 0 and version.startswith("1.1") and not version.startswith("1.10"):
+    if anytls_port > 0 and _version_gte(version, "1.11"):
         anytls_inbound = {
             "type": "anytls",
             "tag": "anytls",
@@ -532,20 +571,20 @@ def generate_configs(
         vmess_path=vmess_path, hy2_port=hy2_port, tuic_port=tuic_port,
     )
 
-    # Generate 1.10 config (no anytls)
+    # Generate 1.10 config (old DNS format, no anytls)
     cfg10 = build_singbox_config(**common_args, anytls_port=0, version="1.10")
     SB_CONFIG_10.write_text(json.dumps(cfg10, indent=2, ensure_ascii=False))
     os.chmod(str(SB_CONFIG_10), 0o600)
 
-    # Generate 1.11+ config (with anytls)
-    cfg11 = build_singbox_config(**common_args, anytls_port=anytls_port, version="1.11")
+    # Generate 1.11+ config (version-appropriate DNS format, with anytls)
+    cfg11 = build_singbox_config(**common_args, anytls_port=anytls_port, version=ver)
     SB_CONFIG_11.write_text(json.dumps(cfg11, indent=2, ensure_ascii=False))
     os.chmod(str(SB_CONFIG_11), 0o600)
 
     # Symlink sb.json to appropriate version
     if SB_CONFIG.exists() or SB_CONFIG.is_symlink():
         SB_CONFIG.unlink()
-    target = SB_CONFIG_11 if ver >= "1.11" else SB_CONFIG_10
+    target = SB_CONFIG_11 if _version_gte(ver, "1.11") else SB_CONFIG_10
     SB_CONFIG.symlink_to(target)
 
     # Save server parameters
@@ -655,6 +694,49 @@ def service_status() -> str:
         return "active" if "started" in r.stdout.lower() else "inactive"
 
 
+# ==================== Firewall ====================
+
+def _has_ufw() -> bool:
+    """Check if ufw is installed and active."""
+    r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
+    return r.returncode == 0 and "active" in r.stdout.lower()
+
+
+def open_firewall_port(port: int, proto: str = "tcp"):
+    """Open a port in the firewall (ufw or iptables)."""
+    if _has_ufw():
+        subprocess.run(["ufw", "allow", f"{port}/{proto}"], capture_output=True, timeout=10)
+    else:
+        subprocess.run(
+            ["iptables", "-I", "INPUT", "-p", proto, "--dport", str(port), "-j", "ACCEPT"],
+            capture_output=True, timeout=10,
+        )
+
+
+def configure_firewall(
+    vless_port: int = 0,
+    vmess_port: int = 0,
+    hy2_port: int = 0,
+    tuic_port: int = 0,
+    anytls_port: int = 0,
+    sub_port: int = 0,
+    admin_port: int = 0,
+):
+    """Open all necessary ports in the firewall."""
+    print("\033[33m配置防火墙...\033[0m")
+
+    tcp_ports = [p for p in [vless_port, vmess_port, anytls_port, sub_port, admin_port] if p]
+    udp_ports = [p for p in [hy2_port, tuic_port] if p]
+
+    for port in tcp_ports:
+        open_firewall_port(port, "tcp")
+    for port in udp_ports:
+        open_firewall_port(port, "udp")
+
+    opened = [f"{p}/tcp" for p in tcp_ports] + [f"{p}/udp" for p in udp_ports]
+    print(f"\033[32m防火墙已放行: {', '.join(opened)}\033[0m")
+
+
 # ==================== Validation ====================
 
 def validate_config() -> bool:
@@ -745,11 +827,17 @@ def full_install(
     if not validate_config():
         raise RuntimeError("配置验证失败，请检查参数")
 
-    # 11. Setup and start service
+    # 11. Configure firewall
+    configure_firewall(
+        vless_port=vless_port, vmess_port=vmess_port,
+        hy2_port=hy2_port, tuic_port=tuic_port, anytls_port=anytls_port,
+    )
+
+    # 12. Setup and start service
     setup_service()
     start_service()
 
-    # 12. Verify service is running
+    # 13. Verify service is running
     time.sleep(2)
     status = service_status()
     if status != "active":
@@ -835,6 +923,7 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
             c["inbounds"] = inbounds
             save_sb_config(config_path, c)
 
+        open_firewall_port(vmess_port, "tcp")
         print(f"\033[32mVMess-WS 已添加 (端口: {vmess_port}, 路径: {vmess_path})\033[0m")
     else:
         print(f"\033[33mVMess-WS 已存在 (路径: {vmess_path})\033[0m")
@@ -868,6 +957,75 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
     return vmess_path
 
 
+# ==================== Config Migration ====================
+
+def migrate_config_for_version():
+    """Migrate config files to match the installed sing-box version."""
+    from singbox import load_sb_config, save_sb_config
+
+    ver = get_major_minor()
+    if not _version_gte(ver, "1.12"):
+        return
+
+    for config_path in [SB_CONFIG_11]:
+        cfg = load_sb_config(config_path)
+        if not cfg or "dns" not in cfg:
+            continue
+
+        # Migrate DNS servers from legacy format to new typed format
+        servers = cfg["dns"].get("servers", [])
+        if not any("address" in s for s in servers):
+            continue  # Already migrated
+
+        new_servers = []
+        for s in servers:
+            if "address" not in s:
+                new_servers.append(s)
+                continue
+            addr = s["address"]
+            new_s = {"tag": s.get("tag", "")}
+            if addr.startswith("tls://"):
+                new_s["type"] = "tls"
+                new_s["server"] = addr[6:]
+            elif addr.startswith("https://"):
+                new_s["type"] = "https"
+                new_s["server"] = addr[8:]
+            else:
+                new_s["type"] = "udp"
+                new_s["server"] = addr
+            if "detour" in s:
+                new_s["detour"] = s["detour"]
+            new_servers.append(new_s)
+
+        cfg["dns"]["servers"] = new_servers
+
+        # Migrate store_selected → cache_file
+        exp = cfg.get("experimental", {})
+        clash = exp.get("clash_api", {})
+        if clash.pop("store_selected", None):
+            exp.setdefault("cache_file", {})["enabled"] = True
+            cfg["experimental"] = exp
+
+        # Add default_domain_resolver if missing
+        route = cfg.setdefault("route", {})
+        if "default_domain_resolver" not in route:
+            route["default_domain_resolver"] = "google"
+
+        # Remove deprecated dns outbound (removed in 1.13)
+        cfg["outbounds"] = [o for o in cfg.get("outbounds", []) if o.get("type") != "dns"]
+
+        # Migrate dns route rule: outbound → action
+        rules = cfg.get("route", {}).get("rules", [])
+        for i, r in enumerate(rules):
+            if r.get("protocol") == "dns" and r.get("outbound") == "dns-out":
+                rules[i] = {"protocol": "dns", "action": "hijack-dns"}
+        cfg.setdefault("route", {})["rules"] = rules
+
+        save_sb_config(config_path, cfg)
+
+    print("\033[32m配置已迁移至新版格式\033[0m")
+
+
 # ==================== Upgrade ====================
 
 def upgrade_singbox(version: str = ""):
@@ -895,9 +1053,12 @@ def upgrade_singbox(version: str = ""):
         new_mm = get_major_minor()
         if SB_CONFIG.is_symlink():
             SB_CONFIG.unlink()
-        target = SB_CONFIG_11 if new_mm >= "1.11" else SB_CONFIG_10
+        target = SB_CONFIG_11 if _version_gte(new_mm, "1.11") else SB_CONFIG_10
         if target.exists():
             SB_CONFIG.symlink_to(target)
+
+        # Migrate config format if crossing version boundaries (e.g. 1.11 → 1.12+)
+        migrate_config_for_version()
 
         if validate_config():
             start_service()

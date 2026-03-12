@@ -9,7 +9,10 @@
       "Bash(echo \"=== File sizes ===\" && wc -l *.py | sort -n && echo \"\" && echo \"=== Final compile check ===\" && python3 -c \"\nimport py_compile, glob\nok = 0\nfor f in sorted\\(glob.glob\\('*.py'\\)\\):\n    try:\n        py_compile.compile\\(f, doraise=True\\)\n        ok += 1\n    except py_compile.PyCompileError as e:\n        print\\(f'FAIL: {f}: {e}'\\)\nprint\\(f'All {ok} files compiled successfully'\\)\n\")",
       "Bash(lsb_release -a)",
       "Read(//usr/lib/**)",
-      "WebFetch(domain:www.v2ex.com)"
+      "WebFetch(domain:www.v2ex.com)",
+      "Bash(cd /home/yongyan/Desktop/vpn/vpn-manager && python3 -m py_compile installer.py && echo \"OK\")",
+      "Bash(python3 -m py_compile installer.py && python3 -m py_compile config.py && python3 -m py_compile singbox.py && echo \"All OK\")",
+      "Bash(python3 -m py_compile installer.py && echo \"OK\")"
     ]
   }
 }
