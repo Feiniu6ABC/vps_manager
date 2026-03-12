@@ -171,9 +171,15 @@ class ThreadedHTTPServer(HTTPServer):
 def run_server(port: int = 8888):
     server = ThreadedHTTPServer(("0.0.0.0", port), RequestHandler)
 
-    # Enable HTTPS using sing-box's existing certificates
-    cert = SB_DIR / "cert.pem"
-    key = SB_DIR / "private.key"
+    # Enable HTTPS — prefer dedicated admin cert, fall back to sing-box cert
+    from pathlib import Path as _P
+    admin_cert = _P("/etc/vpn-manager/ssl/admin.crt")
+    admin_key = _P("/etc/vpn-manager/ssl/admin.key")
+    if admin_cert.exists() and admin_key.exists():
+        cert, key = admin_cert, admin_key
+    else:
+        cert = SB_DIR / "cert.pem"
+        key = SB_DIR / "private.key"
     use_ssl = cert.exists() and key.exists()
 
     if use_ssl:

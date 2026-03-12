@@ -327,8 +327,16 @@ def action_install():
         else:
             djk_port_in = prompt("  发卡网站端口 [80]: ").strip()
             djk_port = int(djk_port_in) if djk_port_in else 80
-            djk_user = prompt("  管理员用户名 [admin]: ").strip() or "admin"
-            djk_pass = prompt("  管理员密码 [admin123]: ").strip() or "admin123"
+            djk_user = ""
+            while not djk_user:
+                djk_user = prompt("  管理员用户名 (必填): ").strip()
+                if not djk_user:
+                    red("  用户名不能为空")
+            djk_pass = ""
+            while not djk_pass:
+                djk_pass = prompt("  管理员密码 (必填): ").strip()
+                if not djk_pass:
+                    red("  密码不能为空")
             if deploy_dujiaoka(djk_port, djk_user, djk_pass):
                 djk_deployed = True
                 print()
@@ -853,8 +861,16 @@ def _deploy_dujiaoka_menu():
             return
     port = prompt("  端口 [80]: ").strip()
     port = int(port) if port else 80
-    admin_user = prompt("  管理员用户名 [admin]: ").strip() or "admin"
-    admin_pass = prompt("  管理员密码 [admin123]: ").strip() or "admin123"
+    admin_user = ""
+    while not admin_user:
+        admin_user = prompt("  管理员用户名 (必填): ").strip()
+        if not admin_user:
+            red("  用户名不能为空")
+    admin_pass = ""
+    while not admin_pass:
+        admin_pass = prompt("  管理员密码 (必填): ").strip()
+        if not admin_pass:
+            red("  密码不能为空")
     if not install_docker():
         red("  Docker 安装失败"); return
     if deploy_dujiaoka(port, admin_user, admin_pass):
