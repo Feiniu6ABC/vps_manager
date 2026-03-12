@@ -218,13 +218,18 @@ def handle_admin_request(handler: BaseHTTPRequestHandler, method: str, path: str
             services.check_traffic()
             _send_json(handler, 200, {"ok": True})
         elif sub == "/api/change-password":
+            new_user = body.get("username", "").strip()
             new_pwd = body.get("password", "")
-            if len(new_pwd) < 6:
+            if new_user and len(new_user) < 3:
+                _send_json(handler, 400, {"error": "用户名至少3位"})
+            elif len(new_pwd) < 6:
                 _send_json(handler, 400, {"error": "密码至少6位"})
             else:
+                if new_user:
+                    db.set_config("admin_username", new_user)
                 db.set_config("admin_password", hash_password(new_pwd))
                 _sessions.clear()
-                services.log_operation("修改密码", "", "admin")
+                services.log_operation("修改密码", f"用户: {new_user or '(未修改)'}", "admin")
                 _send_json(handler, 200, {"ok": True})
         elif sub == "/api/logout":
             if session_token in _sessions:
@@ -276,11 +281,18 @@ def _handle_login(handler: BaseHTTPRequestHandler):
         return
 
     body = _read_body(handler)
+    username = body.get("username", "")
     password = body.get("password", "")
     stored = db.get_config("admin_password", "")
+    stored_user = db.get_config("admin_username", "admin")
 
     if not stored:
         _send_json(handler, 400, {"error": "请先设置管理员密码"})
+        return
+
+    if username != stored_user:
+        record_attempt(ip)
+        _send_json(handler, 401, {"error": "用户名或密码错误"})
         return
 
     if verify_password(password, stored):
@@ -289,7 +301,7 @@ def _handle_login(handler: BaseHTTPRequestHandler):
         _send_json(handler, 200, {"token": token})
     else:
         record_attempt(ip)
-        _send_json(handler, 401, {"error": "密码错误"})
+        _send_json(handler, 401, {"error": "用户名或密码错误"})
 
 
 def _handle_setup(handler: BaseHTTPRequestHandler):
@@ -299,14 +311,19 @@ def _handle_setup(handler: BaseHTTPRequestHandler):
         return
 
     body = _read_body(handler)
+    username = body.get("username", "").strip()
     password = body.get("password", "")
+    if not username or len(username) < 3:
+        _send_json(handler, 400, {"error": "用户名至少3位"})
+        return
     if len(password) < 6:
         _send_json(handler, 400, {"error": "密码至少6位"})
         return
 
+    db.set_config("admin_username", username)
     db.set_config("admin_password", hash_password(password))
     token = create_session()
-    services.log_operation("初始化密码", f"IP: {handler.client_address[0]}", "admin")
+    services.log_operation("初始化密码", f"用户: {username}, IP: {handler.client_address[0]}", "admin")
     _send_json(handler, 200, {"token": token})
 
 
@@ -434,7 +451,8 @@ border-radius:8px;z-index:300;font-size:13px;opacity:0;transition:opacity .3s;po
 <h1>VPN Admin Panel</h1>
 <p id="loginSubtitle">管理员登录</p>
 <div class="error" id="loginError" style="display:none"></div>
-<input type="password" id="loginPwd" placeholder="管理员密码" autofocus>
+<input type="text" id="loginUser" placeholder="用户名" autofocus autocomplete="username">
+<input type="password" id="loginPwd" placeholder="密码" autocomplete="current-password">
 <input type="password" id="loginPwd2" placeholder="确认密码" style="display:none">
 <button onclick="doLogin()" id="loginBtn">登录</button>
 </div>
@@ -475,7 +493,8 @@ async function initAuth(){
     const r=await fetch(API+'/check');
     const d=await r.json();
     if(!d.has_password){
-      document.getElementById('loginSubtitle').textContent='首次使用，请设置管理员密码';
+      document.getElementById('loginSubtitle').textContent='首次使用，请设置管理员账号';
+      document.getElementById('loginUser').placeholder='设置用户名 (至少3位)';
       document.getElementById('loginPwd').placeholder='设置密码 (至少6位)';
       document.getElementById('loginPwd2').style.display='';
       document.getElementById('loginBtn').textContent='确认设置';
@@ -492,22 +511,26 @@ async function initAuth(){
   document.getElementById('loginPage').style.display='flex';
 }
 async function doLogin(){
+  const user=document.getElementById('loginUser').value;
   const pwd=document.getElementById('loginPwd').value;
+  if(!user){showLoginErr('请输入用户名');return}
   if(!pwd){showLoginErr('请输入密码');return}
   try{
-    const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+    const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:pwd})});
     const d=await r.json();
     if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
     else showLoginErr(d.error||'登录失败')
   }catch(e){showLoginErr('网络错误: '+e.message)}
 }
 async function doSetup(){
+  const user=document.getElementById('loginUser').value;
   const p1=document.getElementById('loginPwd').value;
   const p2=document.getElementById('loginPwd2').value;
+  if(!user||user.length<3){showLoginErr('用户名至少3位');return}
   if(p1.length<6){showLoginErr('密码至少6位');return}
   if(p1!==p2){showLoginErr('两次密码不一致');return}
   try{
-    const r=await fetch(API+'/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p1})});
+    const r=await fetch(API+'/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:p1})});
     const d=await r.json();
     if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
     else showLoginErr(d.error||'设置失败')
@@ -867,6 +890,7 @@ async function doChangePwd(){
 
 // ===== Init =====
 document.addEventListener('DOMContentLoaded',initAuth);
+document.getElementById('loginUser').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('loginPwd').focus()});
 document.getElementById('loginPwd').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('loginBtn').click()});
 </script>
 </body>

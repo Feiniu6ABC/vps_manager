@@ -251,21 +251,26 @@ def action_install():
     print(f"  管理面板 (直连): http://{result['server_ip']}:{sub_port}/admin")
     print()
 
-    # ==================== Step 4: Admin Password ====================
+    # ==================== Step 4: Admin Account ====================
     print()
     green("─" * 60)
-    green("  第 4 步: 设置管理员密码")
+    green("  第 4 步: 设置管理员账号")
     green("─" * 60)
     print()
-    print("  管理员密码用于登录 Web 管理面板")
+    print("  管理员账号用于登录 Web 管理面板")
     print(f"  面板地址: http://{result['server_ip']}:{sub_port}/admin")
     print()
 
+    admin_user = ""
     while True:
-        admin_pwd = prompt("  设置管理员密码 (至少6位): ").strip()
-        if not admin_pwd:
-            yellow("  已跳过，可稍后通过菜单 [15. Web 管理面板] 设置")
+        admin_user = prompt("  管理员用户名 (至少3位): ").strip()
+        if not admin_user:
+            yellow("  已跳过，可稍后在面板首次访问时设置")
             break
+        if len(admin_user) < 3:
+            red("  用户名至少3位，请重新输入")
+            continue
+        admin_pwd = prompt("  管理员密码 (至少6位): ").strip()
         if len(admin_pwd) < 6:
             red("  密码至少6位，请重新输入")
             continue
@@ -274,8 +279,9 @@ def action_install():
             red("  两次密码不一致，请重新输入")
             continue
         from dashboard import hash_password
+        db.set_config("admin_username", admin_user)
         db.set_config("admin_password", hash_password(admin_pwd))
-        green("  管理员密码已设置!")
+        green("  管理员账号已设置!")
         break
 
     # ==================== Step 5: USDT Payment (epusdt) ====================

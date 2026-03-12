@@ -1264,6 +1264,15 @@ def _ensure_payment_infra(mysql_password: str = ""):
     if "Up" not in r.stdout:
         subprocess.run(["docker", "rm", "-f", "payment-mysql"], capture_output=True, timeout=10)
         print("\033[33m启动 MySQL...\033[0m")
+        # Create MySQL charset config (fixes CLI client + all connections)
+        mysql_cnf_dir = Path("/opt/mysql-conf")
+        mysql_cnf_dir.mkdir(parents=True, exist_ok=True)
+        (mysql_cnf_dir / "charset.cnf").write_text(
+            "[client]\ndefault-character-set=utf8mb4\n\n"
+            "[mysql]\ndefault-character-set=utf8mb4\n\n"
+            "[mysqld]\ncharacter-set-server=utf8mb4\n"
+            "collation-server=utf8mb4_unicode_ci\n"
+        )
         subprocess.run([
             "docker", "run", "-d", "--name", "payment-mysql",
             "--restart", "always",
@@ -1272,6 +1281,7 @@ def _ensure_payment_infra(mysql_password: str = ""):
             "-e", "MYSQL_DATABASE=epusdt",
             "-p", "127.0.0.1:3306:3306",
             "-v", "payment-mysql-data:/var/lib/mysql",
+            "-v", f"{mysql_cnf_dir}/charset.cnf:/etc/mysql/conf.d/charset.cnf:ro",
             DOCKER_IMAGE_MYSQL,
         ], capture_output=True, text=True, timeout=120)
     else:
@@ -1556,6 +1566,8 @@ DB_PORT=3306
 DB_DATABASE=dujiaoka
 DB_USERNAME=root
 DB_PASSWORD={mysql_password}
+DB_CHARSET=utf8mb4
+DB_COLLATION=utf8mb4_unicode_ci
 
 BROADCAST_DRIVER=log
 CACHE_DRIVER=file
@@ -1792,6 +1804,41 @@ REDIS_PORT=6379
                     capture_output=True, text=True, timeout=10,
                 )
             print(f"\033[32m已自动创建 {len(plans)} 个VPN商品\033[0m")
+
+            # Pre-generate initial card keys (subscription URLs) so shop has stock
+            try:
+                import services as svc_mod
+                sub_port = db_mod.get_config("sub_port", "8888")
+                server_ip = ""
+                try:
+                    server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+                except Exception:
+                    pass
+                initial_count = 5  # 5 cards per plan
+                for plan in plans:
+                    p = dict(plan)
+                    cards = svc_mod.generate_cards(p["id"], initial_count)
+                    if cards:
+                        # Find the goods_id for this plan (by ord position)
+                        r = subprocess.run(
+                            ["docker", "exec", "payment-mysql", "mysql",
+                             "-uroot", f"-p{mysql_password}", "dujiaoka", "-N",
+                             "-e", f"SELECT id FROM goods WHERE ord={plans.index(plan) + 1} LIMIT 1"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        goods_id = r.stdout.strip() or str(p["id"])
+                        values = ", ".join(
+                            f"({goods_id}, 1, 0, '{url}', NOW(), NOW())" for url in cards
+                        )
+                        subprocess.run(
+                            ["docker", "exec", "payment-mysql", "mysql",
+                             "-uroot", f"-p{mysql_password}", "dujiaoka",
+                             "-e", f"INSERT INTO carmis (goods_id, status, is_loop, carmi, created_at, updated_at) VALUES {values}"],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                print(f"\033[32m已为每个商品生成 {initial_count} 张初始卡密\033[0m")
+            except Exception as e:
+                print(f"\033[33m初始卡密生成跳过: {e}\033[0m")
     except Exception as e:
         print(f"\033[33m商品自动创建失败: {e}\033[0m")
 

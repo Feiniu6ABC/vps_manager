@@ -186,7 +186,15 @@ During installation, `deploy_dujiaoka()` automatically:
 4. Configures epusdt payment method (UPDATE pays SET ... WHERE pay_check='epusdt')
 5. Disables all demo payment methods
 6. Creates VPN product group + 3 products matching vpn-manager plans
-7. Sets admin password via `php artisan tinker`
+7. Pre-generates 5 card keys per plan (subscription URLs) so shop has initial stock
+8. Sets admin password via `php artisan tinker`
+
+### Admin authentication
+- Login requires both **username** and **password** (not password-only)
+- Default username stored in config key `admin_username` (default: "admin")
+- Password hashed with PBKDF2, stored in config key `admin_password`
+- Error messages don't reveal whether username or password is wrong ("用户名或密码错误")
+- Rate limiting: 5 attempts per 5 minutes per IP
 
 ## Docker Image Pinning
 
@@ -241,6 +249,18 @@ DOCKER_IMAGE_DUJIAOKA = "stilleshan/dujiaoka@sha256:320818591390..."
 
 ### 9. `database.py` context manager
 - `db.get_db()` returns a context manager, must use `with db.get_db() as conn:` — NOT `db.get_db().execute()`
+
+### 10. MySQL 5.7 client charset defaults to latin1
+- **Problem**: Even with `--character-set-server=utf8mb4`, the `mysql` CLI client inside the container defaults to `character_set_client=latin1`. Chinese text inserted via `docker exec payment-mysql mysql -e "INSERT..."` gets double-encoded (UTF-8 bytes interpreted as latin1, then stored as UTF-8).
+- **Fix**: Mount a custom `/etc/mysql/conf.d/charset.cnf` into the container that sets `[client] default-character-set=utf8mb4` and `[mysqld] character-set-server=utf8mb4`. This ensures ALL connections (CLI, PHP, Go) use utf8mb4.
+
+### 11. dujiaoka type=1 stock = carmis count (not in_stock field)
+- **Problem**: For `type=1` goods (auto delivery), dujiaoka's Goods model accessor overrides `in_stock` with the count of unsold card keys in `carmis` table. Setting `in_stock=999` in the INSERT has no effect — shop shows "库存不足" if there are no card keys.
+- **Fix**: Pre-generate subscription URLs via `services.generate_cards()` and insert into dujiaoka's `carmis` table during deployment. The installer creates 5 initial card keys per plan.
+
+### 12. `/usr/bin/vpn-manager` must be a regular file, NOT a symlink
+- **Problem**: If the shortcut is a symlink to `/etc/vpn-manager/main.py`, the `install_shortcut()` function writes a bash wrapper through the symlink, destroying the Python source. The vpn-sub service then fails with SyntaxError.
+- **Fix**: `install_shortcut()` checks `os.path.islink()` and removes the symlink first. Always creates a regular file.
 
 ## Legacy
 
