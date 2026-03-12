@@ -1378,9 +1378,9 @@ def deploy_epusdt(
 app_uri=http://{server_domain}:{port}
 app_debug=false
 http_listen=:{port}
-static_path=/app/static
-runtime_root_path=/app/runtime
-log_save_path=/app/logs
+static_path=/static
+runtime_root_path=/runtime
+log_save_path=/logs
 log_max_size=32
 log_max_age=7
 max_backups=3
@@ -1480,15 +1480,20 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `deleted_at` datetime(3) DEFAULT NULL,
   `trade_id` varchar(32) NOT NULL,
   `order_id` varchar(32) NOT NULL,
+  `block_transaction_id` varchar(128) DEFAULT NULL,
   `amount` decimal(19,4) NOT NULL,
   `actual_amount` decimal(19,4) NOT NULL,
   `token` varchar(50) NOT NULL,
-  `status` tinyint(1) NOT NULL DEFAULT 1,
+  `status` int NOT NULL DEFAULT 1,
   `notify_url` varchar(255) NOT NULL,
   `redirect_url` varchar(255) DEFAULT NULL,
+  `callback_num` int DEFAULT 0,
+  `callback_confirm` int DEFAULT 2,
   PRIMARY KEY (`id`),
   UNIQUE KEY `trade_id` (`trade_id`),
-  KEY `idx_orders_deleted_at` (`deleted_at`)
+  UNIQUE KEY `order_id` (`order_id`),
+  KEY `idx_orders_deleted_at` (`deleted_at`),
+  KEY `orders_block_transaction_id_index` (`block_transaction_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
     r = subprocess.run(
@@ -1571,7 +1576,7 @@ DB_COLLATION=utf8mb4_unicode_ci
 
 BROADCAST_DRIVER=log
 CACHE_DRIVER=file
-QUEUE_CONNECTION=sync
+QUEUE_CONNECTION=redis
 SESSION_DRIVER=file
 SESSION_LIFETIME=120
 
@@ -1814,7 +1819,7 @@ REDIS_PORT=6379
                     server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
                 except Exception:
                     pass
-                initial_count = 5  # 5 cards per plan
+                initial_count = 50  # 50 cards per plan
                 for plan in plans:
                     p = dict(plan)
                     cards = svc_mod.generate_cards(p["id"], initial_count)

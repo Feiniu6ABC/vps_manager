@@ -210,8 +210,9 @@ DOCKER_IMAGE_DUJIAOKA = "stilleshan/dujiaoka@sha256:320818591390..."
 ## Known Pitfalls & Lessons Learned
 
 ### 1. epusdt GORM AutoMigrate broken (stilleshan/epusdt Docker image)
-- **Problem**: The `stilleshan/epusdt` image (v0.0.2) uses GORM AutoMigrate which silently fails with MySQL 5.7. Tables `wallet_address` and `orders` are never created. epusdt starts and serves HTTP but logs `Error 1146: Table 'epusdt.wallet_address' doesn't exist` every 5 seconds.
-- **Fix**: Manually CREATE TABLE via `docker exec payment-mysql mysql` after container starts, then INSERT wallet address, then `docker restart epusdt`.
+- **Problem**: The `stilleshan/epusdt` image (v0.0.2) uses GORM AutoMigrate which creates incomplete tables with MySQL 5.7. The `orders` table is missing `block_transaction_id`, `callback_num`, and `callback_confirm` columns. This causes the epusdt API to return `Error 1054: Unknown column 'block_transaction_id'` when creating payment transactions, which breaks the entire dujiaoka → epusdt payment flow.
+- **Symptom**: User clicks "buy" on dujiaoka shop → dujiaoka's EpusdtController POSTs to epusdt API → epusdt returns 200 with `status_code: 400` error → dujiaoka shows error page or empty response (due to `catch (RuleValidationException) {}` empty catch block) → order expires.
+- **Fix**: Manually CREATE TABLE with the full schema from epusdt's `sql/v0.0.1.sql` (including `block_transaction_id varchar(128)`, `callback_num int DEFAULT 0`, `callback_confirm int DEFAULT 2`, UNIQUE KEY on `order_id`, INDEX on `block_transaction_id`), then INSERT wallet address, then `docker restart epusdt`.
 
 ### 2. dujiaoka schema: install.sql, NOT Laravel migrations
 - **Problem**: The `stilleshan/dujiaoka` image has no migration files. Running `php artisan migrate` does nothing.
@@ -256,7 +257,16 @@ DOCKER_IMAGE_DUJIAOKA = "stilleshan/dujiaoka@sha256:320818591390..."
 
 ### 11. dujiaoka type=1 stock = carmis count (not in_stock field)
 - **Problem**: For `type=1` goods (auto delivery), dujiaoka's Goods model accessor overrides `in_stock` with the count of unsold card keys in `carmis` table. Setting `in_stock=999` in the INSERT has no effect — shop shows "库存不足" if there are no card keys.
-- **Fix**: Pre-generate subscription URLs via `services.generate_cards()` and insert into dujiaoka's `carmis` table during deployment. The installer creates 5 initial card keys per plan.
+- **Fix**: Pre-generate subscription URLs via `services.generate_cards()` and insert into dujiaoka's `carmis` table during deployment. The installer creates 50 initial card keys per plan.
+
+### 13. epusdt path config: Go code prepends "." to path values
+- **Problem**: epusdt Go code prepends `.` directly to config path values. With `static_path=/app/static` → `./app/static` → `/app/app/static` (wrong). With `static_path=static` → `.static` (wrong). Payment checkout page returns "open .../index.html: no such file or directory".
+- **Fix**: Use `/static`, `/runtime`, `/logs` (leading slash). Go code turns them into `./static`, `./runtime`, `./logs` which resolve correctly from working dir `/app`.
+
+### 14. dujiaoka QUEUE_CONNECTION must be redis, NOT sync
+- **Problem**: With `QUEUE_CONNECTION=sync`, Laravel's `dispatch()->delay()` is ignored — delayed jobs (like `OrderExpired`) execute immediately. This causes orders to expire the instant they are created, before the user can click "pay".
+- **Symptom**: User creates order → sees bill page → order already expired (status=-1) within seconds.
+- **Fix**: Set `QUEUE_CONNECTION=redis` in dujiaoka's `.env`. Redis is already deployed as `payment-redis`. The supervisord `dujiaoka-worker` process picks up delayed jobs from Redis.
 
 ### 12. `/usr/bin/vpn-manager` must be a regular file, NOT a symlink
 - **Problem**: If the shortcut is a symlink to `/etc/vpn-manager/main.py`, the `install_shortcut()` function writes a bash wrapper through the symlink, destroying the Python source. The vpn-sub service then fails with SyntaxError.
