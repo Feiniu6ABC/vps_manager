@@ -250,6 +250,21 @@ def gen_vmess_link(uuid: str, tag: str, params: dict) -> str | None:
     return "vmess://" + base64.b64encode(json.dumps(obj).encode()).decode()
 
 
+def gen_vmess_cf_link(uuid: str, tag: str, params: dict) -> str | None:
+    """Generate VMess link that goes through Cloudflare CDN."""
+    cf_domain = params.get("cf_domain", "")
+    vm_path = params.get("vm_path", "")
+    if not cf_domain or not vm_path:
+        return None
+    obj = {
+        "v": "2", "ps": f"{tag}-CF备用", "add": cf_domain, "port": "443",
+        "id": uuid, "aid": "0", "scy": "auto", "net": "ws", "type": "none",
+        "host": cf_domain, "path": vm_path, "tls": "tls",
+        "sni": cf_domain, "fp": "chrome",
+    }
+    return "vmess://" + base64.b64encode(json.dumps(obj).encode()).decode()
+
+
 def gen_vmess_argo_link(uuid: str, tag: str, params: dict, domain: str) -> str | None:
     if not params.get("vm_port") or not domain:
         return None

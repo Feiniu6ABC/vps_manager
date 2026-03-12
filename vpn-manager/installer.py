@@ -783,6 +783,91 @@ def full_install(
     return result
 
 
+# ==================== Add CF Backup ====================
+
+def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
+    """
+    Add Cloudflare CDN backup to an existing installation.
+    Requires: a domain already pointed to CF (orange cloud enabled) and DNS A record to VPS IP.
+
+    This adds a VMess-WS inbound (if not present) and saves the CF domain for subscription generation.
+    """
+    from singbox import load_sb_config, save_sb_config
+
+    cfg = load_sb_config(SB_CONFIG)
+    if not cfg:
+        raise RuntimeError("无法读取 sing-box 配置")
+
+    # Check if VMess-WS inbound already exists
+    has_vmess = False
+    vmess_path = ""
+    for ib in cfg.get("inbounds", []):
+        if ib.get("type") == "vmess":
+            has_vmess = True
+            vmess_path = ib.get("transport", {}).get("path", "")
+            break
+
+    if not has_vmess:
+        # Need to add VMess-WS inbound to all config files
+        uuid = cfg["inbounds"][0]["users"][0].get("uuid", "") if cfg["inbounds"] else generate_uuid()
+        vmess_path = f"/{os.urandom(8).hex()}"
+
+        vmess_inbound = {
+            "type": "vmess",
+            "tag": "vmess-ws",
+            "listen": "::",
+            "listen_port": vmess_port,
+            "users": [{"uuid": uuid, "alterId": 0}],
+            "transport": {
+                "type": "ws",
+                "path": vmess_path,
+            },
+        }
+
+        for config_path in [SB_CONFIG, SB_CONFIG_10, SB_CONFIG_11]:
+            c = load_sb_config(config_path)
+            if not c:
+                continue
+            # Insert VMess after VLESS (index 1)
+            inbounds = c.get("inbounds", [])
+            insert_pos = 1 if len(inbounds) > 0 else 0
+            inbounds.insert(insert_pos, vmess_inbound)
+            c["inbounds"] = inbounds
+            save_sb_config(config_path, c)
+
+        print(f"\033[32mVMess-WS 已添加 (端口: {vmess_port}, 路径: {vmess_path})\033[0m")
+    else:
+        print(f"\033[33mVMess-WS 已存在 (路径: {vmess_path})\033[0m")
+
+    # Save CF domain to database
+    import database as db_mod
+    db_mod.set_config("cf_domain", domain)
+
+    # Validate and restart
+    if validate_config():
+        restart_service()
+        print(f"\033[32mCloudflare CDN 备用已配置\033[0m")
+        print(f"\033[32m  域名: {domain}\033[0m")
+        print(f"\033[32m  VMess 端口: {vmess_port}\033[0m")
+        print(f"\033[32m  WS 路径: {vmess_path}\033[0m")
+        print()
+        print("\033[33m请确保 Cloudflare DNS 设置正确:\033[0m")
+        server_ip = ""
+        try:
+            server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+        except Exception:
+            pass
+        print(f"  1. 域名 {domain} 的 A 记录指向 {server_ip or 'VPS_IP'}")
+        print(f"  2. Cloudflare 代理状态: 橙色云朵 (已代理)")
+        print(f"  3. SSL/TLS 模式: Flexible 或 Full")
+        print()
+        print("\033[33m下一步: 执行 [刷新订阅] 让用户订阅包含 CF 备用线路\033[0m")
+    else:
+        print("\033[31m配置验证失败，请检查\033[0m")
+
+    return vmess_path
+
+
 # ==================== Upgrade ====================
 
 def upgrade_singbox(version: str = ""):

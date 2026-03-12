@@ -238,6 +238,11 @@ def generate_user_sub(user_id: str):
     uuid = user["uuid"]
     links = []
 
+    # Load CF domain if configured
+    cf_domain = db.get_config("cf_domain", "")
+    if cf_domain:
+        params["cf_domain"] = cf_domain
+
     for proto in protocols:
         link = None
         if proto == "vless-reality":
@@ -246,6 +251,10 @@ def generate_user_sub(user_id: str):
             link = singbox.gen_vmess_link(uuid, tag, params)
             if link:
                 links.append(link)
+            # CF CDN backup link
+            cf_link = singbox.gen_vmess_cf_link(uuid, tag, params)
+            if cf_link:
+                links.append(cf_link)
             argo = params.get("argo_domain")
             if argo:
                 link = singbox.gen_vmess_argo_link(uuid, tag, params, argo)

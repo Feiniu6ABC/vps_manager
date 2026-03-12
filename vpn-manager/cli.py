@@ -621,11 +621,16 @@ def action_singbox_mgmt():
     color = "\033[32m" if status == "active" else "\033[31m"
     print(f"\n  sing-box v{ver}: {color}{status}\033[0m")
     print()
+    cf_domain = db.get_config("cf_domain", "")
+    cf_status = f"\033[32m已配置 ({cf_domain})\033[0m" if cf_domain else "\033[33m未配置\033[0m"
+    print(f"  CF 备用: {cf_status}")
+    print()
     print("  1. 重启 sing-box")
     print("  2. 停止 sing-box")
     print("  3. 升级 sing-box")
     print("  4. 查看日志")
-    print("  5. 重新安装")
+    print("  5. 配置 Cloudflare CDN 备用")
+    print("  6. 重新安装")
     print("  0. 返回")
     c = prompt("  请选择: ")
     if c == "1":
@@ -646,7 +651,60 @@ def action_singbox_mgmt():
                           capture_output=True, text=True, timeout=10)
         print(r.stdout)
     elif c == "5":
+        action_setup_cf()
+    elif c == "6":
         action_install()
+
+
+def action_setup_cf():
+    """Configure Cloudflare CDN backup."""
+    from installer import add_cf_backup
+    cf_domain = db.get_config("cf_domain", "")
+    print()
+    green("  Cloudflare CDN 备用线路配置")
+    green("  " + "=" * 50)
+    print()
+    print("  原理: 当 VPS 的 IP 被墙时，流量通过 Cloudflare CDN 中转")
+    print("  前提: 你有一个域名，且已托管到 Cloudflare")
+    print()
+    if cf_domain:
+        yellow(f"  当前 CF 域名: {cf_domain}")
+        print("  1. 修改域名")
+        print("  2. 移除 CF 备用")
+        print("  0. 返回")
+        c = prompt("  请选择: ")
+        if c == "1":
+            domain = prompt("  输入新域名 (如 vpn.example.com): ").strip()
+            if domain:
+                add_cf_backup(domain)
+                # Refresh subs
+                services.generate_all_subs()
+                green("  订阅已刷新，用户将自动获得 CF 备用线路")
+        elif c == "2":
+            db.set_config("cf_domain", "")
+            services.generate_all_subs()
+            green("  CF 备用已移除")
+    else:
+        print("  配置步骤:")
+        print("  1. 在 Cloudflare 添加你的域名")
+        print("  2. 添加 A 记录指向 VPS IP，代理状态开启 (橙色云朵)")
+        print("  3. SSL/TLS 设置为 Flexible")
+        print("  4. 在下方输入你的域名")
+        print()
+        domain = prompt("  输入域名 (如 vpn.example.com，回车跳过): ").strip()
+        if domain:
+            try:
+                add_cf_backup(domain)
+                # Also enable vmess-ws protocol for subscriptions
+                import json as _json
+                protos = db.get_config_json("protocols", ["vless-reality"])
+                if "vmess-ws" not in protos:
+                    protos.append("vmess-ws")
+                    db.set_config("protocols", _json.dumps(protos))
+                services.generate_all_subs()
+                green("  配置完成! 订阅已包含 CF 备用线路")
+            except Exception as e:
+                red(f"  配置失败: {e}")
 
 
 def action_view_logs():
