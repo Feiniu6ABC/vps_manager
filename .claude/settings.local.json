@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /home/yongyan/Desktop/vpn/vpn-manager.sh)",
+      "Bash(bash -n /home/yongyan/Desktop/vpn/vpn-manager.sh 2>&1)",
+      "Bash(cd /home/yongyan/Desktop/vpn/vpn-manager && for f in config.py utils.py database.py singbox.py services.py server.py dashboard.py cli.py main.py; do echo \"=== $f ===\" && python3 -c \"import py_compile; py_compile.compile\\('$f', doraise=True\\)\" 2>&1 && echo \"OK\" || echo \"FAIL\"; done)",
+      "Bash(grep -n 'sed.*\\\\$\\\\|sed.*`' /home/yongyan/Desktop/vpn/sb.sh | head -20)",
+      "Bash(for f:*)",
+      "Bash(echo \"=== File sizes ===\" && wc -l *.py | sort -n && echo \"\" && echo \"=== Final compile check ===\" && python3 -c \"\nimport py_compile, glob\nok = 0\nfor f in sorted\\(glob.glob\\('*.py'\\)\\):\n    try:\n        py_compile.compile\\(f, doraise=True\\)\n        ok += 1\n    except py_compile.PyCompileError as e:\n        print\\(f'FAIL: {f}: {e}'\\)\nprint\\(f'All {ok} files compiled successfully'\\)\n\")"
+    ]
+  }
+}
