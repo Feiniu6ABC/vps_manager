@@ -35,7 +35,14 @@ def action_install():
 
     existing = get_installed_version()
     if existing:
-        yellow(f"\n检测到已安装 sing-box v{existing}")
+        from installer import service_status
+        status = service_status()
+        yellow(f"\n检测到已安装 sing-box v{existing} ({status})")
+        print("  重新安装将:")
+        print("    - 停止当前 sing-box 服务")
+        print("    - 下载最新版 sing-box")
+        print("    - 重新生成配置文件和密钥")
+        print("    - 现有用户数据库保留不变")
         ans = prompt("是否重新安装？(y/N): ")
         if ans.lower() != "y":
             return
@@ -115,33 +122,65 @@ def action_install():
     # Display results
     _show_install_result(result)
 
-    # ==================== Step 2: Cloudflare CDN Backup ====================
+    # ==================== Step 2: Cloudflare CDN + 域名配置 ====================
     print()
     green("─" * 60)
-    green("  第 2 步: Cloudflare CDN 备用线路 (防 IP 被墙)")
+    green("  第 2 步: Cloudflare 域名配置 (CDN 备用 + HTTPS 管理)")
     green("─" * 60)
     print()
-    print("  当 VPS 的 IP 被 GFW 封锁时，流量可通过 Cloudflare CDN 中转")
+    print("  配置 Cloudflare 域名后可获得:")
+    print("    - VPN 备用线路: IP 被墙时通过 CF CDN 中转")
+    print("    - 管理面板 HTTPS: 隐藏服务器 IP，加密访问")
+    print("    - 发卡网站: 买家通过域名访问")
+    print()
     print("  需要提前准备:")
-    print("    1. 一个域名 (任意域名商购买，推荐 Namesilo / Cloudflare)")
+    print("    1. 一个域名 (推荐 Namesilo / Cloudflare 购买)")
     print("    2. 域名已托管到 Cloudflare (使用 Cloudflare 的 DNS)")
-    print()
-    yellow("  Cloudflare 配置方法:")
-    print(f"    1. 登录 cloudflare.com → 选择你的域名")
-    print(f"    2. DNS → 添加 A 记录:")
-    print(f"       名称: vpn (或任意子域名)")
-    print(f"       内容: {result['server_ip']}")
-    print(f"       代理状态: 已代理 (橙色云朵，必须开启)")
-    print(f"    3. SSL/TLS → Overview → 加密模式选择 Flexible")
-    print(f"       (左侧菜单 SSL/TLS → 点击 Configure → 选 Flexible)")
     print()
 
     if vmess_port > 0:
-        cf_domain = prompt("  输入你的 CF 域名 (如 vpn.example.com，回车跳过): ").strip()
-        if cf_domain and validate_domain(cf_domain):
+        cf_input = prompt("  输入你的域名 (如 example.com 或 vpn.example.com，回车跳过): ").strip()
+        if cf_input and validate_domain(cf_input):
+            # Extract base domain: vpn.example.com → example.com
+            parts = cf_input.split(".")
+            if len(parts) > 2:
+                base_domain = ".".join(parts[-2:])
+            else:
+                base_domain = cf_input
+            cf_vpn_domain = f"vpn.{base_domain}"
+            cf_admin_domain = f"admin.{base_domain}"
+            cf_shop_domain = f"shop.{base_domain}"
+
+            # Store all domains
+            db.set_config("base_domain", base_domain)
+
+            print()
+            yellow(f"  域名: {base_domain}")
+            print(f"    vpn.{base_domain}   → VPN CDN 备用线路")
+            print(f"    admin.{base_domain} → 管理面板 (HTTPS, 端口 2096)")
+            print(f"    shop.{base_domain}  → 发卡网站 (HTTP, 端口 80)")
+            print()
+            yellow("  请在 Cloudflare 添加以下 DNS 记录:")
+            print()
+            print(f"    ┌──────┬────────┬─────────────────┬───────────────────────┐")
+            print(f"    │ 类型 │ 名称   │ 内容            │ 代理状态              │")
+            print(f"    ├──────┼────────┼─────────────────┼───────────────────────┤")
+            print(f"    │ A    │ vpn    │ {result['server_ip']:<15} │ 已代理 (橙色云朵)     │")
+            print(f"    │ A    │ admin  │ {result['server_ip']:<15} │ 已代理 (橙色云朵)     │")
+            print(f"    │ A    │ shop   │ {result['server_ip']:<15} │ 仅DNS (灰色,不代理)   │")
+            print(f"    └──────┴────────┴─────────────────┴───────────────────────┘")
+            print()
+            yellow("  注意: shop 必须用灰色云朵 (仅 DNS)!")
+            print(f"    因为端口 443 已被 VPN 占用，CF 代理会路由到错误端口")
+            print()
+            yellow("  SSL/TLS 设置:")
+            print(f"    Cloudflare → SSL/TLS → 加密模式选 Full")
+            print(f"    (服务器已自带 SSL 证书，不要选 Flexible)")
+            print()
+
             try:
                 from installer import add_cf_backup
-                add_cf_backup(cf_domain)
+                add_cf_backup(cf_vpn_domain)
                 import json as _json
                 protos = db.get_config_json("protocols", ["vless-reality"])
                 if "vmess-ws" not in protos:
@@ -151,7 +190,7 @@ def action_install():
             except Exception as e:
                 red(f"  CF 配置失败: {e}")
                 yellow("  可稍后在菜单 [16. sing-box 管理] 中配置")
-        elif cf_domain:
+        elif cf_input:
             red("  域名格式无效，已跳过")
             yellow("  可稍后在菜单 [16. sing-box 管理] → [5. 配置 CF 备用] 中配置")
         else:
@@ -206,11 +245,10 @@ def action_install():
     # Start subscription server
     _install_and_start_service()
     print()
-    yellow("  HTTPS 访问设置:")
-    print(f"    1. Cloudflare DNS 添加 A 记录:")
-    print(f"       名称: admin (或 sub)  内容: {result['server_ip']}  代理: 开启 (橙色云朵)")
-    print(f"    2. 然后通过 https://admin.你的域名:{sub_port}/admin 访问")
-    print(f"    3. 也可直接用 http://{result['server_ip']}:{sub_port}/admin (无加密)")
+    base_domain = db.get_config("base_domain", "")
+    if base_domain:
+        green(f"  管理面板: https://admin.{base_domain}:{sub_port}/admin")
+    print(f"  管理面板 (直连): http://{result['server_ip']}:{sub_port}/admin")
     print()
 
     # ==================== Step 4: Admin Password ====================
@@ -249,34 +287,27 @@ def action_install():
     print("  epusdt 是开源的 USDT-TRC20 收款网关")
     print("  买家付 USDT → epusdt 检测到账 → 通知发卡平台发货")
     print()
-    print("  需要准备:")
-    print("    - TRON 钱包收款地址 (T 开头)")
-    print("    - TRON 钱包私钥 (用于检测到账，不会转走你的币)")
-    print("    推荐用 TokenPocket 创建钱包，无需手机号")
+    print("  需要: Docker (自动安装)、MySQL、Redis (自动部署)")
+    print("  TRON 钱包地址在 epusdt 部署完成后通过管理面板配置")
     print()
     ans = prompt("  是否现在部署 epusdt？(y/N): ").strip()
     epusdt_deployed = False
     if ans.lower() == "y":
-        from installer import install_docker, deploy_epusdt
-        if not install_docker():
-            red("  Docker 安装失败，跳过 epusdt 部署")
-        else:
-            tron_addr = prompt("  输入 TRON 收款地址 (T开头): ").strip()
-            tron_key = prompt("  输入 TRON 钱包私钥: ").strip()
-            if tron_addr and tron_key:
-                epusdt_token = prompt("  epusdt API 密钥 (回车自动生成): ").strip()
-                if not epusdt_token:
-                    import secrets as _s
-                    epusdt_token = _s.token_hex(16)
-                if deploy_epusdt(tron_addr, tron_key, epusdt_token, result['server_ip']):
-                    db.set_config("epusdt_token", epusdt_token)
-                    epusdt_deployed = True
-                    green(f"  epusdt API 密钥: {epusdt_token}")
-                    yellow("  (已保存，配置独角数卡时会用到)")
-            else:
-                red("  地址或私钥为空，已跳过")
+        from installer import deploy_epusdt
+        epusdt_token = prompt("  epusdt API 密钥 (回车自动生成): ").strip()
+        if not epusdt_token:
+            import secrets as _s
+            epusdt_token = _s.token_hex(16)
+        if deploy_epusdt("", "", epusdt_token, result['server_ip']):
+            db.set_config("epusdt_token", epusdt_token)
+            epusdt_deployed = True
+            green(f"  epusdt API 密钥: {epusdt_token}")
+            print()
+            yellow("  部署完成后配置 TRON 钱包:")
+            print(f"    打开 http://{result['server_ip']}:8000")
+            print(f"    通过 API 添加钱包地址 (参考部署指南)")
     if not epusdt_deployed:
-        yellow("  已跳过，可稍后手动部署 (参考部署指南第五步)")
+        yellow("  已跳过，可稍后在菜单 [13. 发卡平台] 部署")
 
     # ==================== Step 6: Card Platform (独角数卡) ====================
     print()
@@ -288,23 +319,25 @@ def action_install():
     print()
     ans = prompt("  是否现在部署独角数卡？(y/N): ").strip()
     djk_deployed = False
+    djk_port = 80
     if ans.lower() == "y":
         from installer import install_docker, deploy_dujiaoka
         if not install_docker():
             red("  Docker 安装失败，跳过")
         else:
-            djk_port = prompt("  发卡网站端口 [80]: ").strip()
-            djk_port = int(djk_port) if djk_port else 80
-            if deploy_dujiaoka(djk_port):
+            djk_port_in = prompt("  发卡网站端口 [80]: ").strip()
+            djk_port = int(djk_port_in) if djk_port_in else 80
+            djk_user = prompt("  管理员用户名 [admin]: ").strip() or "admin"
+            djk_pass = prompt("  管理员密码 [admin123]: ").strip() or "admin123"
+            if deploy_dujiaoka(djk_port, djk_user, djk_pass):
                 djk_deployed = True
                 print()
-                yellow("  独角数卡需要在浏览器中完成初始化:")
-                print(f"    1. 打开 http://{result['server_ip']}:{djk_port}")
-                print(f"    2. 按向导设置网站名称、管理员账号")
-                print(f"    3. 数据库选 SQLite")
-                print(f"    4. 安装完成后登录后台: http://{result['server_ip']}:{djk_port}/admin")
+                green("  独角数卡已自动初始化完成!")
+                print(f"    后台地址: http://{result['server_ip']}:{djk_port}/admin")
+                print(f"    用户名: {djk_user}")
+                print(f"    密码: {djk_pass}")
                 print()
-                yellow("  然后在后台配置支付和商品:")
+                yellow("  后台配置支付和商品:")
                 print()
                 yellow("  配置支付 (对接 epusdt):")
                 epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
@@ -339,19 +372,41 @@ def action_install():
     print(f"  VLESS 端口:     {result['vless_port']}")
     if result['vmess_port']:
         print(f"  VMess-WS 端口:  {result['vmess_port']}")
+
+    base_domain = db.get_config("base_domain", "")
     cf_domain = db.get_config("cf_domain", "")
-    if cf_domain:
-        print(f"  CF CDN 域名:    {cf_domain}")
-    print(f"  订阅服务端口:   {sub_port}")
-    cf_domain = db.get_config("cf_domain", "")
-    if cf_domain:
-        base_domain = cf_domain.split(".", 1)[-1] if "." in cf_domain else cf_domain
-        print(f"  管理面板:       https://admin.{base_domain}:{sub_port}/admin (CF HTTPS)")
-    print(f"  管理面板:       http://{result['server_ip']}:{sub_port}/admin (直连)")
+
+    if base_domain:
+        print()
+        yellow("  域名配置:")
+        print(f"    CF CDN 备用:  vpn.{base_domain}")
+        print(f"    管理面板:     https://admin.{base_domain}:{sub_port}/admin")
+        if djk_deployed:
+            print(f"    发卡网站:     http://shop.{base_domain}")
+    elif cf_domain:
+        derived_base = cf_domain.split(".", 1)[-1] if "." in cf_domain else cf_domain
+        print()
+        yellow("  域名配置:")
+        print(f"    CF CDN 备用:  {cf_domain}")
+        print(f"    管理面板:     https://admin.{derived_base}:{sub_port}/admin")
+        if djk_deployed:
+            print(f"    发卡网站:     http://shop.{derived_base}")
+
+    print()
+    yellow("  直连地址 (无域名也可用):")
+    print(f"    管理面板:     http://{result['server_ip']}:{sub_port}/admin")
     if epusdt_deployed:
-        print(f"  epusdt 收款:    http://{result['server_ip']}:8000")
+        print(f"    epusdt 收款:  http://{result['server_ip']}:8000")
     if djk_deployed:
-        print(f"  发卡网站:       http://{result['server_ip']}:{djk_port}")
+        print(f"    发卡网站:     http://{result['server_ip']}:{djk_port}")
+
+    if base_domain:
+        print()
+        yellow("  重要: 确保 Cloudflare 已完成以下配置:")
+        print(f"    1. DNS: vpn 和 admin → 已代理 (橙色云朵)")
+        print(f"           shop → 仅 DNS (灰色云朵)")
+        print(f"    2. SSL/TLS 加密模式: Full")
+
     print()
     yellow("  常用命令:")
     print("    vpn-manager          # 进入管理菜单")
@@ -751,39 +806,31 @@ def action_card_platform():
 
 def _deploy_epusdt_menu():
     """Deploy epusdt from the card platform menu."""
-    from installer import install_docker, deploy_epusdt
+    from installer import deploy_epusdt
     print()
     yellow("  部署 epusdt (USDT-TRC20 自动收款)")
     print("  " + "-" * 50)
-    # Check Docker status
-    r = subprocess.run(["docker", "ps", "--filter", "name=epusdt", "--format", "{{.Status}}"],
-                       capture_output=True, text=True, timeout=10)
-    if r.stdout.strip():
-        green(f"  epusdt 状态: {r.stdout.strip()}")
+    # Check service status
+    r = subprocess.run(["systemctl", "is-active", "epusdt"], capture_output=True, text=True, timeout=5)
+    if "active" in r.stdout:
+        green(f"  epusdt 状态: 运行中")
         ans = prompt("  是否重新部署？(y/N): ").strip()
         if ans.lower() != "y":
             return
     print()
-    print("  需要 TRON 钱包信息 (推荐用 TokenPocket 创建):")
-    print("  - 收款地址: 主页 → 点 TRX → 收款 → 复制 (T开头)")
-    print("  - 私钥: 我的 → 管理钱包 → 导出私钥")
+    print("  epusdt 需要 Docker + MySQL + Redis (自动部署)")
+    print("  TRON 钱包地址在部署完成后通过 epusdt 管理面板配置")
     print()
-    tron_addr = prompt("  TRON 收款地址: ").strip()
-    tron_key = prompt("  TRON 钱包私钥: ").strip()
-    if not tron_addr or not tron_key:
-        red("  地址或私钥不能为空"); return
     token = prompt("  API 密钥 (回车自动生成): ").strip()
     if not token:
         import secrets as _s
         token = _s.token_hex(16)
-    if not install_docker():
-        red("  Docker 安装失败"); return
     server_ip = ""
     try:
         server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
     except Exception:
         pass
-    if deploy_epusdt(tron_addr, tron_key, token, server_ip):
+    if deploy_epusdt("", "", token, server_ip):
         db.set_config("epusdt_token", token)
         green(f"\n  epusdt 部署成功!")
         print(f"  API 密钥: {token}")
@@ -806,9 +853,11 @@ def _deploy_dujiaoka_menu():
             return
     port = prompt("  端口 [80]: ").strip()
     port = int(port) if port else 80
+    admin_user = prompt("  管理员用户名 [admin]: ").strip() or "admin"
+    admin_pass = prompt("  管理员密码 [admin123]: ").strip() or "admin123"
     if not install_docker():
         red("  Docker 安装失败"); return
-    if deploy_dujiaoka(port):
+    if deploy_dujiaoka(port, admin_user, admin_pass):
         server_ip = ""
         try:
             server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
@@ -822,9 +871,10 @@ def _deploy_dujiaoka_menu():
             db.set_config("api_secret", api_secret)
         epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
         print()
-        green("  独角数卡部署成功!")
-        yellow(f"\n  打开 http://{server_ip}:{port} 完成网页安装向导")
-        yellow(f"  安装后登录后台: http://{server_ip}:{port}/admin")
+        green("  独角数卡部署成功! (已自动初始化)")
+        print(f"    后台地址: http://{server_ip}:{port}/admin")
+        print(f"    用户名: {admin_user}")
+        print(f"    密码: {admin_pass}")
         print()
         yellow("  后台配置支付 (对接 epusdt):")
         print(f"    支付设置 → 添加 → 商户密钥: {epusdt_token}")

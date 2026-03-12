@@ -1,12 +1,14 @@
-"""HTTP subscription server + webhook API + admin dashboard."""
+"""HTTP/HTTPS subscription server + webhook API + admin dashboard."""
 import json
+import ssl
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 import database as db
 import services
-from config import SUBS_DIR
+from config import SUBS_DIR, SB_DIR
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -168,7 +170,21 @@ class ThreadedHTTPServer(HTTPServer):
 
 def run_server(port: int = 8888):
     server = ThreadedHTTPServer(("0.0.0.0", port), RequestHandler)
-    print(f"Subscription server running on port {port} (admin: http://0.0.0.0:{port}/admin)")
+
+    # Enable HTTPS using sing-box's existing certificates
+    cert = SB_DIR / "cert.pem"
+    key = SB_DIR / "private.key"
+    use_ssl = cert.exists() and key.exists()
+
+    if use_ssl:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert), str(key))
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        print(f"Subscription server running on port {port} HTTPS (admin: https://0.0.0.0:{port}/admin)")
+    else:
+        print(f"Subscription server running on port {port} HTTP (admin: http://0.0.0.0:{port}/admin)")
+        print("Warning: No TLS certificates found, running without encryption")
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

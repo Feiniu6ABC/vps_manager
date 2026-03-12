@@ -56,55 +56,46 @@ ssh root@1.2.3.4
 
 ### 2.3 添加 DNS 记录
 
-在 Cloudflare 控制面板 → DNS → 添加记录:
+在 Cloudflare 控制面板 → DNS → 添加 **3 条** A 记录:
 
-```
-记录1 (VPN 用，走 CF CDN):
-  类型: A
-  名称: vpn
-  内容: 1.2.3.4    (你的 VPS IP)
-  代理: 开启 (橙色云朵)
+| 类型 | 名称  | 内容 (你的 VPS IP) | 代理状态 |
+|------|-------|--------------------|----------|
+| A    | vpn   | 1.2.3.4            | 已代理 (橙色云朵) |
+| A    | admin | 1.2.3.4            | 已代理 (橙色云朵) |
+| A    | shop  | 1.2.3.4            | **仅 DNS (灰色云朵)** |
 
-记录2 (发卡网站用，也走 CF CDN):
-  类型: A
-  名称: shop
-  内容: 1.2.3.4
-  代理: 开启 (橙色云朵)
+**三个子域名的用途:**
+- `vpn.myvpn123.top` → VPN CDN 备用线路 (IP 被墙时用) — 橙色代理
+- `admin.myvpn123.top` → 管理面板 + 订阅服务器 (HTTPS，端口 2096) — 橙色代理
+- `shop.myvpn123.top` → 发卡网站 (HTTP，端口 80) — **灰色不代理**
 
-记录3 (订阅服务器 + 管理面板，走 CF 获得 HTTPS):
-  类型: A
-  名称: admin
-  内容: 1.2.3.4
-  代理: 开启 (橙色云朵)
-```
+**为什么 shop 用灰色云朵？**
+VPN 服务占用了 443 端口。CF 代理会把 HTTPS 流量发到 443 端口，导致请求到达 VPN 服务而非发卡网站。关闭 CF 代理后，shop 域名直接解析到 VPS IP，访问端口 80 的发卡网站。
 
 ### 2.4 设置 SSL/TLS 加密模式
 
-这一步很重要，选错了 CF CDN 备用线路会连不上。
+这一步很重要，选错了域名访问会报 525 错误。
 
 ```
 1. 登录 Cloudflare → 选择你的域名 myvpn123.top
 2. 左侧菜单 → 点击 "SSL/TLS"
 3. 点击 "Overview" (概述)
 4. 找到加密模式 (Encryption mode)，点击 "Configure" (配置)
-5. 选择 "Flexible"
+5. 选择 "Full"（不是 Full (strict)，也不是 Flexible）
 6. 保存
 
 如果界面不同 (Cloudflare 经常改版)，也可以试:
-  SSL/TLS → Configuration (配置) → 加密模式下拉框 → Flexible
+  SSL/TLS → Configuration (配置) → 加密模式下拉框 → Full
 ```
 
-**为什么选 Flexible？**
-- Flexible = 访客→Cloudflare 加密，Cloudflare→你的服务器 不加密
-- 因为 VMess-WS 监听的是 HTTP 端口 (8880)，没有 TLS
-- 如果选 Full/Strict，Cloudflare 会尝试用 HTTPS 连你服务器，但服务器没有 HTTPS，会报 502 错误
+**为什么选 Full？**
+- Full = 访客→Cloudflare 加密，Cloudflare→你的服务器 也加密
+- vpn-manager 订阅服务器已自带 SSL 证书 (复用 sing-box 的自签证书)
+- Full 模式不验证证书是否来自可信 CA，所以自签证书没问题
+- 不要选 Flexible (可能导致 525 错误)
+- 不要选 Full (strict) (会验证证书，自签证书会被拒绝)
 
-**注意**：如果你看到 "Off / Flexible / Full / Full (strict)" 四个选项，选 Flexible 就对了。
-
-完成后你有三个子域名:
-- `vpn.myvpn123.top` → CF CDN 备用线路 (被墙时用)
-- `shop.myvpn123.top` → 发卡网站 (买家访问)
-- `admin.myvpn123.top` → 订阅服务器 + 管理面板 (HTTPS，端口 2096)
+**注意**：如果你看到 "Off / Flexible / Full / Full (strict)" 四个选项，选 **Full** 就对了。
 
 ---
 
@@ -150,15 +141,16 @@ Reality SNI [www.microsoft.com]:     ← 直接回车用默认
 
 安装完会显示分享链接和二维码。先用手机扫码测试能不能连上 VPN。
 
-**第 2 步：配置 Cloudflare CDN 备用** (需要先完成第二步的 CF 设置)
+**第 2 步：配置 Cloudflare 域名** (需要先完成第二步的 CF 设置)
 ```
-输入你的 CF 域名 (如 vpn.myvpn123.top，回车跳过): vpn.myvpn123.top
+输入你的域名 (如 myvpn123.top 或 vpn.myvpn123.top，回车跳过): myvpn123.top
 ```
+脚本会自动识别根域名，并显示需要添加的 3 条 DNS 记录 (vpn/admin/shop)。
 如果还没配好 CF，直接回车跳过，之后可以在菜单 [16. sing-box 管理] → [5. 配置 CF 备用] 中设置。
 
 **第 3 步：启动订阅服务器 + Web 管理面板**
 ```
-订阅服务器端口 [8888]:    ← 直接回车用默认
+订阅服务器端口 [2096]:    ← 直接回车用默认 (CF HTTPS 端口)
 ```
 自动启动订阅服务器，包含用户订阅分发、管理面板、发卡 API。
 
@@ -168,7 +160,11 @@ Reality SNI [www.microsoft.com]:     ← 直接回车用默认
 确认密码: xxxxxx
 ```
 
-**安装完成后自动显示汇总信息并进入管理菜单。**
+**第 5 步：部署 epusdt (USDT 收款)** — 需要 TRON 钱包地址和私钥
+
+**第 6 步：部署独角数卡 (发卡网站)** — 需要 Docker
+
+**安装完成后显示汇总信息 (所有域名地址) 并进入管理菜单。**
 
 ### 3.3 后续配置 (在管理菜单中操作)
 
@@ -201,16 +197,22 @@ ufw allow 8000/tcp    # epusdt 收款
 ### 3.4 验证
 
 - 手机客户端用二维码/分享链接连接 VPN → 应该能翻墙
-- 浏览器打开 `https://admin.myvpn123.top:2096/admin` → HTTPS 访问管理面板
-  (或直连: `http://1.2.3.4:2096/admin`)
+- 管理面板: `https://admin.myvpn123.top:2096/admin` (CF HTTPS)
+  或直连: `http://1.2.3.4:2096/admin`
+- 发卡网站: `https://shop.myvpn123.top` (部署独角数卡后)
 - 输入管理员密码 → 进入管理面板
 - 之后可以用 `vpn-manager` 命令随时进入管理菜单
+
+**如果域名访问不了但直连 IP 可以**，检查:
+1. Cloudflare DNS 记录是否已添加 (vpn/admin/shop 三条 A 记录)
+2. 代理状态是否开启 (橙色云朵)
+3. SSL/TLS 加密模式是否为 **Full** (不是 Flexible，不是 Full strict)
+4. DNS 是否已生效 (新记录可能需要几分钟)
+5. Edge 证书是否已签发: SSL/TLS → Edge Certificates → 应有 `*.域名` 的证书
 
 ---
 
 ## 第四步：创建 TRON 钱包 (收 USDT 用)
-
-**在安装向导第 5 步之前完成此步骤。**
 
 ### 4.1 安装 TokenPocket
 
@@ -234,19 +236,15 @@ ufw allow 8000/tcp    # epusdt 收款
 钱包主页 → 右上角 "+" → 搜索 "USDT" → 选择 USDT (TRC-20) → 添加
 ```
 
-### 4.4 记录两个关键信息 (安装向导第5步需要)
+### 4.4 记录收款地址
 
 ```
 收款地址:
   主页 → 点 TRX 或 USDT → 收款 → 复制地址
   得到类似: TJfKxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-私钥:
-  我的 → 管理钱包 → 选你的钱包 → 导出私钥 → 输入密码 → 复制
-  得到一串很长的十六进制字符串
 ```
 
-把这两个值记到安全的地方，安装脚本第 5 步会用到。
+这个地址在 epusdt 部署完成后，通过 epusdt 管理面板配置。
 
 ### 4.5 充值少量 TRX (链上手续费)
 
@@ -271,31 +269,38 @@ ufw allow 8000/tcp    # epusdt 收款
 vpn-manager
 # 输入 13 (发卡平台)
 # 输入 4  (部署 epusdt)
-#   → 输入 TRON 收款地址和私钥
-#   → 自动安装 Docker、部署 epusdt、开放端口
+#   → 自动安装 Docker、MySQL、Redis
+#   → 下载 epusdt 二进制文件
+#   → 创建系统服务、开放端口
 #
 # 输入 5  (部署独角数卡)
-#   → 自动部署，然后按提示在浏览器完成初始化
+#   → 输入管理员用户名和密码
+#   → 自动部署 Docker 容器 (共用 MySQL)
+#   → 自动初始化数据库和管理员账号 (无需浏览器操作)
 ```
 
 ### 5.1 epusdt 部署后
 
-epusdt 会自动:
+脚本会自动:
 - 安装 Docker (如果没有)
-- 拉取 epusdt 镜像并启动
+- 启动 MySQL (MariaDB) + Redis 容器 (epusdt 和独角数卡共用)
+- 下载 epusdt 二进制文件到 `/opt/epusdt/`
+- 创建 systemd 服务并启动
 - 开放 8000 端口
 - 生成 API 密钥
 
-### 5.2 独角数卡初始化 (需要在浏览器操作)
+> epusdt 以系统服务运行，MySQL 和 Redis 以 Docker 容器运行。
 
-部署完成后，打开浏览器完成初始化:
+### 5.2 独角数卡初始化 (全自动)
 
-1. 打开 `http://你的IP:80`
-2. 按安装向导设置:
-   - 网站名称: 比如 "VPN Store"
-   - 管理员账号密码: 自己设
-   - 数据库选 SQLite (最简单)
-3. 安装完成后登录后台: `http://你的IP:80/admin`
+部署时脚本会询问管理员用户名和密码，然后自动完成:
+
+- 生成 Laravel 配置文件 (.env)
+- 启动 Docker 容器 (连接共享 MySQL)
+- 运行数据库迁移 (php artisan migrate)
+- 创建管理员账号
+
+部署完成后直接登录后台: `http://你的IP:80/admin`
 
 ### 5.3 配置支付 (对接 epusdt)
 
@@ -345,14 +350,14 @@ epusdt 会自动:
 
 ### 7.1 模拟买家购买
 
-1. 打开 `http://shop.myvpn123.top` (你的发卡网站)
+1. 打开 `https://shop.myvpn123.top` (你的发卡网站，走 CF HTTPS)
 2. 选择 "VPN 单日套餐 ¥2.00"
 3. 输入邮箱 (随便填) → 点购买
 4. 选择 USDT 支付
 5. 页面显示一个 TRON 地址和金额 (约 0.28 USDT)
 6. 用另一个钱包 (或币安) 转这个金额的 USDT 到显示的地址
 7. 等待 10-30 秒确认
-8. 页面自动跳转显示: "您的订阅链接: http://admin.myvpn123.top:2096/sub/xxxxxx"
+8. 页面自动跳转显示: "您的订阅链接: https://admin.myvpn123.top:2096/sub/xxxxxx"
 
 ### 7.2 验证订阅可用
 
@@ -365,7 +370,7 @@ epusdt 会自动:
 
 ### 7.3 检查管理面板
 
-打开 `http://admin.myvpn123.top:2096/admin`:
+打开 `https://admin.myvpn123.top:2096/admin`:
 - 概览页应该显示 1 个活跃用户
 - 营收显示 ¥2.00
 - 操作日志有记录
@@ -382,7 +387,7 @@ epusdt 会自动:
 ```bash
 vpn-manager --status
 ```
-或者打开管理面板 `http://admin.myvpn123.top:2096/admin`
+或者打开管理面板 `https://admin.myvpn123.top:2096/admin`
 
 ### 提现到币安
 ```
@@ -412,31 +417,32 @@ cp /etc/vpn-manager/vpn-manager.db /root/backup-$(date +%Y%m%d).db
 ```
 买家手机
   │
-  ├── 浏览器访问 shop.myvpn123.top ──→ 独角数卡 (:80)
-  │     │                                  │
-  │     │  选择套餐，点购买                  │
-  │     ▼                                  ▼
-  │   USDT付款 ────────────────→ epusdt (:8000) 检测到账
-  │                                        │
-  │                              通知独角数卡"已付款"
-  │                                        │
-  │                              独角数卡调用 API ──→ vpn-manager (:2096)
-  │                                                      │
-  │                              返回订阅链接 ←──────────┘
-  │     ▲                            │
-  │     │  页面显示订阅链接            │
-  │     └────────────────────────────┘
+  ├── 浏览器访问 https://shop.myvpn123.top ──→ CF CDN ──→ 独角数卡 (:80)
+  │     │                                                     │
+  │     │  选择套餐，点购买                                     │
+  │     ▼                                                     ▼
+  │   USDT付款 ──────────────────────────────→ epusdt (:8000) 检测到账
+  │                                                           │
+  │                                             通知独角数卡"已付款"
+  │                                                           │
+  │                                     独角数卡调用 API ──→ vpn-manager (:2096)
+  │                                                                │
+  │                                     返回订阅链接 ←────────────┘
+  │     ▲                                    │
+  │     │  页面显示订阅链接                    │
+  │     └────────────────────────────────────┘
   │
   ├── V2rayN/Clash 导入订阅链接
+  │     │    https://admin.myvpn123.top:2096/sub/xxxxxx
   │     │
   │     ├── 节点1: VLESS-Reality ──直连──→ sing-box (:443) ──→ 互联网
   │     └── 节点2: CF备用 ──→ Cloudflare CDN ──→ sing-box (:8880) ──→ 互联网
   │
-  └── 正常上网 ✓
+  └── 正常上网
 
 你 (管理员)
   │
-  ├── 管理面板: http://admin.myvpn123.top:2096/admin
+  ├── 管理面板: https://admin.myvpn123.top:2096/admin (CF HTTPS)
   │     └── 查看用户、营收、在线状态、系统健康
   │
   ├── SSH 命令行: vpn-manager
@@ -449,11 +455,11 @@ cp /etc/vpn-manager/vpn-manager.db /root/backup-$(date +%Y%m%d).db
 
 ## 所有服务端口总结
 
-| 端口 | 服务 | 说明 |
-|------|------|------|
-| 443 | sing-box VLESS-Reality | 用户VPN连接 (直连) |
-| 8880 | sing-box VMess-WS | 用户VPN连接 (CF CDN备用) |
-| 2096 | vpn-manager 订阅服务器 | 订阅分发 + 管理面板 + API (CF HTTPS) |
-| 80 | 独角数卡 | 发卡网站 (买家访问) |
-| 8000 | epusdt | USDT 收款网关 |
-| 22 | SSH | 你的管理连接 |
+| 端口 | 服务 | 域名访问 | 说明 |
+|------|------|----------|------|
+| 443 | sing-box VLESS-Reality | — (直连 IP) | 用户 VPN 连接 |
+| 8880 | sing-box VMess-WS | vpn.域名 | CF CDN 备用线路 |
+| 2096 | vpn-manager 订阅服务器 | admin.域名:2096 | 管理面板 + 订阅 + API (HTTPS) |
+| 80 | 独角数卡 | shop.域名 | 发卡网站 (买家访问) |
+| 8000 | epusdt | — (内部) | USDT 收款网关 |
+| 22 | SSH | — | 管理连接 |

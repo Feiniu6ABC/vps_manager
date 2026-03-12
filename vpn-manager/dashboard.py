@@ -471,41 +471,47 @@ const API='/admin/api';
 
 // ===== Auth =====
 async function initAuth(){
-  const r=await fetch(API+'/check');
-  const d=await r.json();
-  if(!d.has_password){
-    document.getElementById('loginSubtitle').textContent='首次使用，请设置管理员密码';
-    document.getElementById('loginPwd').placeholder='设置密码 (至少6位)';
-    document.getElementById('loginPwd2').style.display='';
-    document.getElementById('loginBtn').textContent='确认设置';
-    document.getElementById('loginBtn').onclick=doSetup;
-  }
-  const saved=localStorage.getItem('vpn_admin_token');
-  if(saved){
-    token=saved;
-    const t=await apiFetch('/summary');
-    if(t){showApp();return}
-    localStorage.removeItem('vpn_admin_token');
-  }
+  try{
+    const r=await fetch(API+'/check');
+    const d=await r.json();
+    if(!d.has_password){
+      document.getElementById('loginSubtitle').textContent='首次使用，请设置管理员密码';
+      document.getElementById('loginPwd').placeholder='设置密码 (至少6位)';
+      document.getElementById('loginPwd2').style.display='';
+      document.getElementById('loginBtn').textContent='确认设置';
+      document.getElementById('loginBtn').onclick=doSetup;
+    }
+    const saved=localStorage.getItem('vpn_admin_token');
+    if(saved){
+      token=saved;
+      const t=await apiFetch('/summary');
+      if(t){showApp();return}
+      localStorage.removeItem('vpn_admin_token');
+    }
+  }catch(e){showLoginErr('无法连接服务器: '+e.message)}
   document.getElementById('loginPage').style.display='flex';
 }
 async function doLogin(){
   const pwd=document.getElementById('loginPwd').value;
   if(!pwd){showLoginErr('请输入密码');return}
-  const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
-  const d=await r.json();
-  if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
-  else showLoginErr(d.error||'登录失败')
+  try{
+    const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+    const d=await r.json();
+    if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
+    else showLoginErr(d.error||'登录失败')
+  }catch(e){showLoginErr('网络错误: '+e.message)}
 }
 async function doSetup(){
   const p1=document.getElementById('loginPwd').value;
   const p2=document.getElementById('loginPwd2').value;
   if(p1.length<6){showLoginErr('密码至少6位');return}
   if(p1!==p2){showLoginErr('两次密码不一致');return}
-  const r=await fetch(API+'/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p1})});
-  const d=await r.json();
-  if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
-  else showLoginErr(d.error||'设置失败')
+  try{
+    const r=await fetch(API+'/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p1})});
+    const d=await r.json();
+    if(r.ok){token=d.token;localStorage.setItem('vpn_admin_token',token);showApp()}
+    else showLoginErr(d.error||'设置失败')
+  }catch(e){showLoginErr('网络错误: '+e.message)}
 }
 function showLoginErr(msg){const e=document.getElementById('loginError');e.textContent=msg;e.style.display='block'}
 function doLogout(){token='';localStorage.removeItem('vpn_admin_token');location.reload()}

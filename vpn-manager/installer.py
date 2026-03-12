@@ -9,6 +9,7 @@ Security improvements over sb.sh:
 - Input validation for all user-facing values
 - No sed-based JSON manipulation (pure Python/jq)
 """
+import base64
 import json
 import os
 import sys
@@ -911,6 +912,12 @@ def full_install(
     print("\033[32m" + "=" * 60 + "\033[0m")
     print()
 
+    # 0. Stop existing sing-box if running (prevents "Text file busy")
+    if SB_BIN.exists():
+        print("\033[33m停止现有 sing-box 服务...\033[0m")
+        stop_service()
+        time.sleep(1)
+
     # 1. Dependencies
     if not skip_deps:
         install_dependencies()
@@ -1097,7 +1104,41 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
     return vmess_path
 
 
-# ==================== Docker & Payment Deployment ====================
+# ==================== Payment & Card Platform Deployment ====================
+
+EPUSDT_GITHUB = "https://api.github.com/repos/assimon/epusdt/releases/latest"
+
+
+def cleanup_payment_services():
+    """Stop and remove all payment-related services and containers."""
+    print("\033[33m清理旧的支付服务...\033[0m")
+
+    # Stop epusdt systemd service
+    subprocess.run(["systemctl", "stop", "epusdt"], capture_output=True, timeout=10)
+    subprocess.run(["systemctl", "disable", "epusdt"], capture_output=True, timeout=10)
+    svc = Path("/etc/systemd/system/epusdt.service")
+    if svc.exists():
+        svc.unlink()
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
+
+    # Stop and remove Docker containers (old and new naming)
+    if shutil.which("docker"):
+        for name in ["dujiaoka", "payment-mysql", "payment-redis",
+                      "epusdt-mysql", "epusdt-redis", "epusdt"]:
+            subprocess.run(["docker", "stop", name], capture_output=True, timeout=15)
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=10)
+
+    # Remove Docker network
+    if shutil.which("docker"):
+        subprocess.run(["docker", "network", "rm", "payment-net"], capture_output=True, timeout=10)
+
+    # Clean old config files (keep data volumes)
+    for p in ["/opt/epusdt/.env", "/opt/epusdt/epusdt"]:
+        if os.path.exists(p):
+            os.remove(p)
+
+    print("\033[32m旧服务已清理\033[0m")
+
 
 def install_docker():
     """Install Docker if not present."""
@@ -1124,6 +1165,95 @@ def install_docker():
         return False
 
 
+PAYMENT_NETWORK = "payment-net"
+
+
+def _ensure_payment_infra(mysql_password: str = ""):
+    """Ensure shared MySQL + Redis containers are running for epusdt & dujiaoka."""
+    import secrets as _sec
+
+    if not mysql_password:
+        mysql_password = _sec.token_hex(16)
+
+    # Create Docker network (containers communicate by name)
+    subprocess.run(
+        ["docker", "network", "create", PAYMENT_NETWORK],
+        capture_output=True, timeout=10,
+    )
+
+    # Check if MySQL container exists and is running
+    r = subprocess.run(
+        ["docker", "ps", "-a", "--filter", "name=payment-mysql", "--format", "{{.Status}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "Up" not in r.stdout:
+        subprocess.run(["docker", "rm", "-f", "payment-mysql"], capture_output=True, timeout=10)
+        print("\033[33m启动 MySQL...\033[0m")
+        subprocess.run([
+            "docker", "run", "-d", "--name", "payment-mysql",
+            "--restart", "always",
+            "--network", PAYMENT_NETWORK,
+            "-e", f"MYSQL_ROOT_PASSWORD={mysql_password}",
+            "-e", "MYSQL_DATABASE=epusdt",
+            "-p", "127.0.0.1:3306:3306",
+            "-v", "payment-mysql-data:/var/lib/mysql",
+            "mariadb:10",
+        ], capture_output=True, text=True, timeout=120)
+    else:
+        # Ensure existing container is on the network
+        subprocess.run(
+            ["docker", "network", "connect", PAYMENT_NETWORK, "payment-mysql"],
+            capture_output=True, timeout=10,
+        )
+
+    # Check if Redis container exists and is running
+    r = subprocess.run(
+        ["docker", "ps", "-a", "--filter", "name=payment-redis", "--format", "{{.Status}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "Up" not in r.stdout:
+        subprocess.run(["docker", "rm", "-f", "payment-redis"], capture_output=True, timeout=10)
+        print("\033[33m启动 Redis...\033[0m")
+        subprocess.run([
+            "docker", "run", "-d", "--name", "payment-redis",
+            "--restart", "always",
+            "--network", PAYMENT_NETWORK,
+            "-p", "127.0.0.1:6379:6379",
+            "redis:alpine",
+        ], capture_output=True, text=True, timeout=120)
+    else:
+        subprocess.run(
+            ["docker", "network", "connect", PAYMENT_NETWORK, "payment-redis"],
+            capture_output=True, timeout=10,
+        )
+
+    # Wait for MySQL to be ready
+    print("\033[33m等待 MySQL 就绪...\033[0m")
+    for i in range(30):
+        r = subprocess.run(
+            ["docker", "exec", "payment-mysql", "mysqladmin", "ping",
+             "-uroot", f"-p{mysql_password}", "--silent"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            break
+        time.sleep(2)
+    else:
+        print("\033[31mMySQL 启动超时\033[0m")
+        return ""
+
+    # Create dujiaoka database if not exists
+    subprocess.run(
+        ["docker", "exec", "payment-mysql", "mysql",
+         "-uroot", f"-p{mysql_password}",
+         "-e", "CREATE DATABASE IF NOT EXISTS dujiaoka CHARACTER SET utf8mb4;"],
+        capture_output=True, timeout=10,
+    )
+
+    print("\033[32mMySQL + Redis 就绪\033[0m")
+    return mysql_password
+
+
 def deploy_epusdt(
     tron_address: str,
     tron_private_key: str,
@@ -1131,19 +1261,76 @@ def deploy_epusdt(
     server_domain: str = "",
     port: int = 8000,
 ):
-    """Deploy epusdt USDT payment gateway via Docker."""
+    """Deploy epusdt USDT payment gateway (binary + Docker MySQL/Redis)."""
+    import database as db_mod
+
+    # Clean up any previous deployment
+    cleanup_payment_services()
+
     epusdt_dir = Path("/opt/epusdt")
     epusdt_dir.mkdir(parents=True, exist_ok=True)
+    epusdt_bin = epusdt_dir / "epusdt"
 
-    # Check if already running
-    r = subprocess.run(
-        ["docker", "ps", "--filter", "name=epusdt", "--format", "{{.Names}}"],
-        capture_output=True, text=True, timeout=10,
-    )
-    if "epusdt" in r.stdout:
-        print("\033[33mepusdt 已在运行，重新部署...\033[0m")
-        subprocess.run(["docker", "stop", "epusdt"], capture_output=True, timeout=15)
-        subprocess.run(["docker", "rm", "epusdt"], capture_output=True, timeout=10)
+    # Ensure Docker + MySQL + Redis
+    if not install_docker():
+        return False
+
+    mysql_password = db_mod.get_config("mysql_password", "")
+    mysql_password = _ensure_payment_infra(mysql_password)
+    if not mysql_password:
+        return False
+    db_mod.set_config("mysql_password", mysql_password)
+
+    # Download latest release
+    arch = detect_arch()
+    arch_map = {"amd64": "linux_x86_64", "arm64": "linux_x86_64", "armv7": "linux_armv6"}
+    epusdt_arch = arch_map.get(arch, "linux_x86_64")
+
+    print(f"\033[33m下载 epusdt ({arch})...\033[0m")
+    try:
+        req = urllib.request.Request(EPUSDT_GITHUB, headers={
+            "User-Agent": "vpn-manager/1.0",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release = json.loads(resp.read())
+
+        download_url = ""
+        for asset in release.get("assets", []):
+            name = asset.get("name", "").lower()
+            if epusdt_arch in name and name.endswith(".tar.gz"):
+                download_url = asset.get("browser_download_url", "")
+                break
+
+        if not download_url:
+            tag = release.get("tag_name", "").lstrip("v")
+            arch_direct = {"amd64": "Linux_x86_64", "arm64": "Linux_x86_64", "armv7": "Linux_armv6"}
+            direct_arch = arch_direct.get(arch, "Linux_x86_64")
+            download_url = f"https://github.com/assimon/epusdt/releases/download/v{tag}/epusdt_{tag}_{direct_arch}.tar.gz"
+
+    except Exception as e:
+        print(f"\033[31m获取 epusdt 版本失败: {e}\033[0m")
+        return False
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tarball = os.path.join(tmpdir, "epusdt.tar.gz")
+        try:
+            urllib.request.urlretrieve(download_url, tarball)
+        except Exception as e:
+            print(f"\033[31m下载 epusdt 失败: {e}\033[0m")
+            return False
+
+        subprocess.run(["tar", "xzf", tarball, "-C", str(epusdt_dir)], capture_output=True, timeout=30)
+
+    if not epusdt_bin.exists():
+        print("\033[31m未找到 epusdt 二进制文件\033[0m")
+        return False
+
+    os.chmod(str(epusdt_bin), 0o700)
+
+    # Create runtime directories
+    for d in ["runtime", "logs"]:
+        (epusdt_dir / d).mkdir(exist_ok=True)
 
     # Detect server IP if no domain
     if not server_domain:
@@ -1152,33 +1339,74 @@ def deploy_epusdt(
         except Exception:
             server_domain = "127.0.0.1"
 
-    # Write .env config
-    env_content = f"""app_name=epusdt
+    # Write config (epusdt requires MySQL + Redis)
+    config_content = f"""app_name=epusdt
 app_uri=http://{server_domain}:{port}
 app_debug=false
-db_driver=sqlite
-tron_address={tron_address}
-tron_private_key={tron_private_key}
+http_listen=:{port}
+static_path={epusdt_dir}/static
+runtime_root_path={epusdt_dir}/runtime
+log_save_path={epusdt_dir}/logs
+log_max_size=32
+log_max_age=7
+max_backups=3
+mysql_host=127.0.0.1
+mysql_port=3306
+mysql_user=root
+mysql_passwd={mysql_password}
+mysql_database=epusdt
+mysql_table_prefix=
+mysql_max_idle_conns=10
+mysql_max_open_conns=100
+mysql_max_life_time=6
+redis_host=127.0.0.1
+redis_port=6379
+redis_passwd=
+redis_db=5
+redis_pool_size=5
+redis_max_retries=3
+redis_idle_timeout=1000
+queue_concurrency=10
+queue_level_critical=6
+queue_level_default=3
+queue_level_low=1
+tg_bot_token=
+tg_proxy=
+tg_manage=
 api_auth_token={api_token}
-usdt_rate=7.2
-order_expiration_time=600
+order_expiration_time=10
+forced_usdt_rate=
 """
-    (epusdt_dir / ".env").write_text(env_content)
+    (epusdt_dir / ".env").write_text(config_content)
     os.chmod(str(epusdt_dir / ".env"), 0o600)
 
-    # Run Docker container
-    r = subprocess.run([
-        "docker", "run", "-d",
-        "--name", "epusdt",
-        "--restart", "always",
-        "-p", f"{port}:8000",
-        "-v", f"{epusdt_dir}/.env:/app/.env",
-        "-v", f"{epusdt_dir}/data:/app/data",
-        "dontcry/epusdt:latest",
-    ], capture_output=True, text=True, timeout=120)
+    # Create systemd service (start after Docker)
+    service_content = f"""[Unit]
+Description=epusdt USDT Payment Gateway
+After=network.target docker.service
+Requires=docker.service
 
-    if r.returncode != 0:
-        print(f"\033[31mepusdt 部署失败: {r.stderr[:200]}\033[0m")
+[Service]
+Type=simple
+WorkingDirectory={epusdt_dir}
+ExecStartPre=/bin/sleep 5
+ExecStart={epusdt_bin}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+    Path("/etc/systemd/system/epusdt.service").write_text(service_content)
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
+    subprocess.run(["systemctl", "enable", "epusdt"], capture_output=True, timeout=10)
+    subprocess.run(["systemctl", "start", "epusdt"], capture_output=True, timeout=10)
+
+    # Verify it's running
+    time.sleep(3)
+    r = subprocess.run(["systemctl", "is-active", "epusdt"], capture_output=True, text=True, timeout=5)
+    if "active" not in r.stdout:
+        print("\033[31mepusdt 启动失败，查看日志: journalctl -u epusdt -n 20\033[0m")
         return False
 
     open_firewall_port(port, "tcp")
@@ -1186,34 +1414,134 @@ order_expiration_time=600
     return True
 
 
-def deploy_dujiaoka(port: int = 80):
-    """Deploy 独角数卡 card selling platform via Docker."""
+def deploy_dujiaoka(port: int = 80, admin_user: str = "admin", admin_password: str = "admin123"):
+    """Deploy 独角数卡 card selling platform via Docker, fully automated."""
+    import secrets as _sec
+    import database as db_mod
+
     djk_dir = Path("/opt/dujiaoka")
     djk_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = djk_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure MySQL is running
+    mysql_password = db_mod.get_config("mysql_password", "")
+    if not mysql_password:
+        mysql_password = _ensure_payment_infra()
+        if not mysql_password:
+            print("\033[31mMySQL 启动失败\033[0m")
+            return False
+        db_mod.set_config("mysql_password", mysql_password)
+
+    # Detect server info for APP_URL
+    server_ip = ""
+    try:
+        server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+    except Exception:
+        server_ip = "127.0.0.1"
+    base_domain = db_mod.get_config("base_domain", "")
+    app_url = f"http://shop.{base_domain}" if base_domain else f"http://{server_ip}:{port}"
+
+    # Generate Laravel APP_KEY
+    app_key = f"base64:{base64.b64encode(_sec.token_bytes(32)).decode()}"
+
+    # Create .env — INSTALL=false to skip web installer (we run artisan directly)
+    env_content = f"""APP_NAME=独角数卡
+APP_ENV=local
+APP_KEY={app_key}
+APP_DEBUG=false
+APP_URL={app_url}
+INSTALL=false
+
+LOG_CHANNEL=stack
+
+DB_CONNECTION=mysql
+DB_HOST=payment-mysql
+DB_PORT=3306
+DB_DATABASE=dujiaoka
+DB_USERNAME=root
+DB_PASSWORD={mysql_password}
+
+BROADCAST_DRIVER=log
+CACHE_DRIVER=file
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+REDIS_HOST=payment-redis
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+"""
+    env_file = data_dir / ".env"
+    env_file.write_text(env_content)
+    os.chmod(str(env_file), 0o666)
 
     # Check if already running
     r = subprocess.run(
-        ["docker", "ps", "--filter", "name=dujiaoka", "--format", "{{.Names}}"],
+        ["docker", "ps", "-a", "--filter", "name=dujiaoka", "--format", "{{.Names}}"],
         capture_output=True, text=True, timeout=10,
     )
     if "dujiaoka" in r.stdout:
-        print("\033[33m独角数卡已在运行，重新部署...\033[0m")
+        print("\033[33m独角数卡已存在，重新部署...\033[0m")
         subprocess.run(["docker", "stop", "dujiaoka"], capture_output=True, timeout=15)
         subprocess.run(["docker", "rm", "dujiaoka"], capture_output=True, timeout=10)
 
+    # Start container — mount .env file only, don't overwrite app directory
     r = subprocess.run([
         "docker", "run", "-d",
         "--name", "dujiaoka",
         "--restart", "always",
+        "--network", PAYMENT_NETWORK,
         "-p", f"{port}:80",
-        "-v", f"{djk_dir}/data:/dujiaoka",
-        "-e", "INSTALL=true",
+        "-v", f"{env_file}:/dujiaoka/.env",
         "stilleshan/dujiaoka:latest",
     ], capture_output=True, text=True, timeout=120)
 
     if r.returncode != 0:
         print(f"\033[31m独角数卡部署失败: {r.stderr[:200]}\033[0m")
         return False
+
+    # Wait for container to start
+    print("\033[33m等待独角数卡启动...\033[0m")
+    time.sleep(8)
+
+    r = subprocess.run(
+        ["docker", "ps", "--filter", "name=dujiaoka", "--format", "{{.Status}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "Up" not in r.stdout:
+        print("\033[31m独角数卡启动失败，查看日志: docker logs dujiaoka\033[0m")
+        return False
+
+    # Run database migrations and seed automatically
+    print("\033[33m初始化数据库...\033[0m")
+    r = subprocess.run(
+        ["docker", "exec", "dujiaoka", "php", "artisan", "migrate", "--force"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        print(f"\033[31m数据库迁移失败: {r.stderr[:200]}\033[0m")
+        return False
+
+    subprocess.run(
+        ["docker", "exec", "dujiaoka", "php", "artisan", "db:seed", "--force"],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    # Reset default admin password via tinker
+    hashed = subprocess.run(
+        ["docker", "exec", "dujiaoka", "php", "artisan", "tinker", "--execute",
+         f"echo bcrypt('{admin_password}');"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if hashed.returncode == 0 and hashed.stdout.strip():
+        pwd_hash = hashed.stdout.strip().split("\n")[-1]
+        subprocess.run(
+            ["docker", "exec", "dujiaoka", "php", "artisan", "tinker", "--execute",
+             f"DB::table('admin_users')->updateOrInsert(['username'=>'{admin_user}'],"
+             f"{{'username'=>'{admin_user}','password'=>'{pwd_hash}','name'=>'管理员'}});"],
+            capture_output=True, text=True, timeout=15,
+        )
 
     open_firewall_port(port, "tcp")
     print(f"\033[32m独角数卡已部署 (端口: {port})\033[0m")

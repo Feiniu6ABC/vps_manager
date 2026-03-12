@@ -15,7 +15,21 @@
       "Bash(python3 -m py_compile installer.py && echo \"OK\")",
       "Bash(python3 -m py_compile main.py && echo \"OK\")",
       "Bash(python3 -m py_compile cli.py && echo \"OK\")",
-      "Bash(python3 -m py_compile cli.py && python3 -m py_compile installer.py && echo \"All OK\")"
+      "Bash(python3 -m py_compile cli.py && python3 -m py_compile installer.py && echo \"All OK\")",
+      "Bash(python3 -m py_compile installer.py 2>&1)",
+      "Bash(python3 -m py_compile cli.py 2>&1)",
+      "Bash(curl -s -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/assimon/epusdt/releases/latest\" 2>&1 | head -100)",
+      "Bash(curl -s -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/assimon/epusdt/releases/latest\" 2>&1 | python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(a['name'], a['browser_download_url']\\) for a in data['assets']]\")",
+      "Read(//tmp/**)",
+      "Bash(curl -sL \"https://github.com/assimon/epusdt/releases/download/v0.0.3/epusdt_0.0.3_Linux_x86_64.tar.gz\" -o epusdt.tar.gz)",
+      "Bash(tar tzf:*)",
+      "Bash(grep -r \"vpn-sub.service\\\\|sub_server.py\" /home/yongyan/Desktop/vpn/vpn-manager/*.py)",
+      "Bash(python3 -m py_compile dashboard.py && echo \"OK\")",
+      "Bash(cd /home/yongyan/Desktop/vpn/vpn-manager && python3 -m py_compile installer.py && python3 -m py_compile cli.py && python3 -m py_compile dashboard.py && echo \"All OK\")",
+      "Bash(python3 -m py_compile installer.py && python3 -m py_compile cli.py && python3 -m py_compile dashboard.py && echo \"All OK\")",
+      "Bash(python3 -m py_compile server.py && python3 -m py_compile cli.py && python3 -m py_compile installer.py && echo \"All OK\")",
+      "Bash(python3 -m py_compile installer.py && python3 -m py_compile cli.py && python3 -m py_compile server.py && echo \"All OK\")",
+      "Bash(ls /home/yongyan/Desktop/vpn/2*)"
     ]
   }
 }
