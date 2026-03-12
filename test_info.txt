@@ -1,0 +1,5 @@
+IP of test vps: 139.180.143.96
+web address: dhshnbg.top
+test admin password: 33543613
+wallter address: TAdhkxXPn7TfQnRoxtFuv1Ek5utcgDTCMZ
+wallet private key: 634989af33543613a5368201cb944afb01128d28cf18d212a7c08b52ce6bc753

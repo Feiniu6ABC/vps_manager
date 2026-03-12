@@ -381,6 +381,47 @@ def generate_self_signed_cert():
     print("\033[32m自签名证书已生成\033[0m")
 
 
+def generate_admin_cert(domain: str):
+    """Generate dedicated SSL cert for the admin panel.
+
+    The Reality cert has CN=bing.com which causes Cloudflare 526 errors.
+    This generates a cert with proper CN/SAN matching the domain.
+    server.py prefers /etc/vpn-manager/ssl/admin.{crt,key} over the Reality cert.
+    """
+    ssl_dir = Path("/etc/vpn-manager/ssl")
+    ssl_dir.mkdir(parents=True, exist_ok=True)
+
+    cert_path = ssl_dir / "admin.crt"
+    key_path = ssl_dir / "admin.key"
+
+    if cert_path.exists() and key_path.exists():
+        print("\033[33m管理员 SSL 证书已存在，跳过生成\033[0m")
+        return
+
+    san_entries = [f"DNS:{domain}", f"DNS:*.{domain}"]
+    try:
+        server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+        if server_ip:
+            san_entries.append(f"IP:{server_ip}")
+    except Exception:
+        pass
+    san_string = ",".join(san_entries)
+
+    subprocess.run([
+        "openssl", "req", "-x509", "-nodes",
+        "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+        "-keyout", str(key_path),
+        "-out", str(cert_path),
+        "-days", "3650",
+        "-subj", f"/CN={domain}",
+        "-addext", f"subjectAltName={san_string}",
+    ], capture_output=True, check=True, timeout=30)
+
+    os.chmod(str(cert_path), 0o600)
+    os.chmod(str(key_path), 0o600)
+    print(f"\033[32m管理员 SSL 证书已生成 (CN={domain})\033[0m")
+
+
 # ==================== Configuration Generation ====================
 
 def build_singbox_config(
@@ -1079,6 +1120,13 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
     import database as db_mod
     db_mod.set_config("cf_domain", domain)
 
+    # Generate admin SSL cert for the domain (prevents CF 526 with Reality cert)
+    base_domain = domain.split(".", 1)[-1] if "." in domain else domain
+    try:
+        generate_admin_cert(base_domain)
+    except Exception as e:
+        print(f"\033[33m管理员证书生成失败: {e}\033[0m")
+
     # Validate and restart (validate_config auto-fixes common issues)
     if validate_config():
         restart_service()
@@ -1188,6 +1236,12 @@ def install_docker():
 
 PAYMENT_NETWORK = "payment-net"
 
+# Pin Docker image versions to prevent breakage from upstream changes
+DOCKER_IMAGE_MYSQL = "mysql:5.7"
+DOCKER_IMAGE_REDIS = "redis:7.4-alpine"
+DOCKER_IMAGE_EPUSDT = "stilleshan/epusdt@sha256:ae2c767a9ab355637cc571cbb47599d0655744702b7a9fc3059aa6b7ec1b70ef"
+DOCKER_IMAGE_DUJIAOKA = "stilleshan/dujiaoka@sha256:3208185913903f177f0872d34beeee1943cc5b0b0055f7a20255022a6de7472e"
+
 
 def _ensure_payment_infra(mysql_password: str = ""):
     """Ensure shared MySQL + Redis containers are running for epusdt & dujiaoka."""
@@ -1218,7 +1272,7 @@ def _ensure_payment_infra(mysql_password: str = ""):
             "-e", "MYSQL_DATABASE=epusdt",
             "-p", "127.0.0.1:3306:3306",
             "-v", "payment-mysql-data:/var/lib/mysql",
-            "mysql:5.7",
+            DOCKER_IMAGE_MYSQL,
         ], capture_output=True, text=True, timeout=120)
     else:
         # Ensure existing container is on the network
@@ -1240,7 +1294,7 @@ def _ensure_payment_infra(mysql_password: str = ""):
             "--restart", "always",
             "--network", PAYMENT_NETWORK,
             "-p", "127.0.0.1:6379:6379",
-            "redis:alpine",
+            DOCKER_IMAGE_REDIS,
         ], capture_output=True, text=True, timeout=120)
     else:
         subprocess.run(
@@ -1248,12 +1302,13 @@ def _ensure_payment_infra(mysql_password: str = ""):
             capture_output=True, timeout=10,
         )
 
-    # Wait for MySQL to be ready
+    # Wait for MySQL to be ready (use actual query, not mysqladmin ping which
+    # succeeds before auth is fully initialized on fresh MySQL containers)
     print("\033[33m等待 MySQL 就绪...\033[0m")
     for i in range(30):
         r = subprocess.run(
-            ["docker", "exec", "payment-mysql", "mysqladmin", "ping",
-             "-uroot", f"-p{mysql_password}", "--silent"],
+            ["docker", "exec", "payment-mysql", "mysql",
+             "-uroot", f"-p{mysql_password}", "-e", "SELECT 1"],
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
@@ -1374,7 +1429,7 @@ forced_usdt_rate=
         "--network", PAYMENT_NETWORK,
         "-p", f"{port}:{port}",
         "-v", f"{epusdt_dir / '.env'}:/app/.env",
-        "stilleshan/epusdt",
+        DOCKER_IMAGE_EPUSDT,
     ], capture_output=True, text=True, timeout=120)
 
     if r.returncode != 0:
@@ -1394,6 +1449,60 @@ forced_usdt_rate=
         )
         print(f"\033[31mepusdt 启动失败: {logs.stdout[-200:] + logs.stderr[-200:]}\033[0m")
         return False
+
+    # GORM AutoMigrate in stilleshan/epusdt is broken — create tables manually
+    epusdt_schema = """
+CREATE TABLE IF NOT EXISTS `wallet_address` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime(3) DEFAULT NULL,
+  `updated_at` datetime(3) DEFAULT NULL,
+  `deleted_at` datetime(3) DEFAULT NULL,
+  `token` varchar(50) NOT NULL,
+  `status` tinyint(1) NOT NULL DEFAULT 1,
+  PRIMARY KEY (`id`),
+  KEY `idx_wallet_address_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `orders` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime(3) DEFAULT NULL,
+  `updated_at` datetime(3) DEFAULT NULL,
+  `deleted_at` datetime(3) DEFAULT NULL,
+  `trade_id` varchar(32) NOT NULL,
+  `order_id` varchar(32) NOT NULL,
+  `amount` decimal(19,4) NOT NULL,
+  `actual_amount` decimal(19,4) NOT NULL,
+  `token` varchar(50) NOT NULL,
+  `status` tinyint(1) NOT NULL DEFAULT 1,
+  `notify_url` varchar(255) NOT NULL,
+  `redirect_url` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `trade_id` (`trade_id`),
+  KEY `idx_orders_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+    r = subprocess.run(
+        ["docker", "exec", "-i", "payment-mysql", "mysql",
+         "-uroot", f"-p{mysql_password}", "epusdt"],
+        input=epusdt_schema, capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        print(f"\033[33mepusdt 表创建失败: {(r.stderr or '')[:200]}\033[0m")
+
+    # Add TRON wallet address if provided
+    if tron_address:
+        safe_addr = re.sub(r"[^a-zA-Z0-9]", "", tron_address)
+        subprocess.run(
+            ["docker", "exec", "payment-mysql", "mysql",
+             "-uroot", f"-p{mysql_password}", "epusdt",
+             "-e", f"INSERT IGNORE INTO wallet_address (created_at, updated_at, token, status) "
+                   f"VALUES (NOW(), NOW(), '{safe_addr}', 1)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        print(f"\033[32mTRON 钱包已配置: {tron_address}\033[0m")
+
+    # Restart epusdt to pick up the tables
+    subprocess.run(["docker", "restart", "epusdt"], capture_output=True, timeout=15)
 
     open_firewall_port(port, "tcp")
     print(f"\033[32mepusdt 已部署 (端口: {port})\033[0m")
@@ -1431,7 +1540,8 @@ def deploy_dujiaoka(port: int = 80, admin_user: str = "admin", admin_password: s
     app_key = f"base64:{base64.b64encode(_sec.token_bytes(32)).decode()}"
 
     # Create .env — INSTALL=false to skip web installer (we run artisan directly)
-    env_content = f"""APP_NAME=独角数卡
+    # APP_NAME must be quoted (Laravel .env parser fails on unquoted values with spaces)
+    env_content = f"""APP_NAME="独角数卡"
 APP_ENV=local
 APP_KEY={app_key}
 APP_DEBUG=false
@@ -1488,7 +1598,7 @@ REDIS_PORT=6379
         "--network", PAYMENT_NETWORK,
         "-p", f"{port}:80",
         "-v", f"{env_file}:/dujiaoka/.env",
-        "stilleshan/dujiaoka:latest",
+        DOCKER_IMAGE_DUJIAOKA,
     ], capture_output=True, text=True, timeout=120)
 
     if r.returncode != 0:
@@ -1570,6 +1680,123 @@ REDIS_PORT=6379
              f"{{'username'=>'{admin_user}','password'=>'{pwd_hash}','name'=>'管理员'}});"],
             capture_output=True, text=True, timeout=15,
         )
+
+    # Auto-configure epusdt payment method if epusdt was deployed
+    # Schema: pay_check=unique key, merchant_id=API token (signing key),
+    #         merchant_pem=gateway URL, pay_handleroute=pay/epusdt
+    epusdt_token = db_mod.get_config("epusdt_token", "")
+    if epusdt_token:
+        try:
+            safe_token = re.sub(r"[^a-zA-Z0-9_]", "", epusdt_token)
+            # Update existing epusdt entry (install.sql may have a placeholder)
+            # or insert if not present
+            update_sql = (
+                f"UPDATE pays SET pay_name='USDT-TRC20', pay_method=1, pay_client=3, "
+                f"merchant_id='{safe_token}', merchant_key='', "
+                f"merchant_pem='http://epusdt:8000/api/v1/order/create-transaction', "
+                f"pay_handleroute='pay/epusdt', is_open=1, updated_at=NOW() "
+                f"WHERE pay_check='epusdt'"
+            )
+            r = subprocess.run(
+                ["docker", "exec", "payment-mysql", "mysql",
+                 "-uroot", f"-p{mysql_password}", "dujiaoka",
+                 "-e", update_sql],
+                capture_output=True, text=True, timeout=15,
+            )
+            # If no row matched, insert new
+            if r.returncode == 0 and "0 rows" in (r.stdout + r.stderr):
+                insert_sql = (
+                    "INSERT INTO pays (pay_name, pay_check, pay_method, pay_client, "
+                    "merchant_id, merchant_key, merchant_pem, pay_handleroute, is_open, "
+                    "created_at, updated_at) VALUES ("
+                    f"'USDT-TRC20', 'epusdt', 1, 3, '{safe_token}', '', "
+                    f"'http://epusdt:8000/api/v1/order/create-transaction', "
+                    f"'pay/epusdt', 1, NOW(), NOW())"
+                )
+                r = subprocess.run(
+                    ["docker", "exec", "payment-mysql", "mysql",
+                     "-uroot", f"-p{mysql_password}", "dujiaoka",
+                     "-e", insert_sql],
+                    capture_output=True, text=True, timeout=15,
+                )
+            # Disable all demo payment methods (install.sql has many placeholders)
+            subprocess.run(
+                ["docker", "exec", "payment-mysql", "mysql",
+                 "-uroot", f"-p{mysql_password}", "dujiaoka",
+                 "-e", "UPDATE pays SET is_open=0 WHERE pay_check != 'epusdt'"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0:
+                print("\033[32mepusdt 支付方式已自动配置\033[0m")
+            else:
+                print("\033[33mepusdt 支付自动配置失败，请在后台手动添加\033[0m")
+        except Exception:
+            pass
+
+    # Auto-create VPN product group and products matching vpn-manager plans
+    try:
+        with db_mod.get_db() as conn:
+            plans = conn.execute(
+                "SELECT id, name, duration_hours, traffic_gb, bandwidth_mbps, price, max_connections FROM plans"
+            ).fetchall()
+        if plans:
+            # Create product group
+            group_sql = (
+                "INSERT INTO goods_group (gp_name, is_open, ord, created_at, updated_at) "
+                "VALUES ('VPN套餐', 1, 1, NOW(), NOW())"
+            )
+            subprocess.run(
+                ["docker", "exec", "payment-mysql", "mysql",
+                 "-uroot", f"-p{mysql_password}", "dujiaoka", "-e", group_sql],
+                capture_output=True, text=True, timeout=10,
+            )
+            # Get group id
+            r = subprocess.run(
+                ["docker", "exec", "payment-mysql", "mysql",
+                 "-uroot", f"-p{mysql_password}", "dujiaoka", "-N",
+                 "-e", "SELECT MAX(id) FROM goods_group"],
+                capture_output=True, text=True, timeout=10,
+            )
+            group_id = r.stdout.strip() or "1"
+
+            for idx, plan in enumerate(plans):
+                p = dict(plan)
+                dur = p["duration_hours"]
+                if dur <= 24:
+                    dur_str = f"{dur}小时"
+                else:
+                    dur_str = f"{dur // 24}天"
+                desc_short = (
+                    f"{dur_str}有效 | {p['traffic_gb']}GB流量 | "
+                    f"{p['bandwidth_mbps']}Mbps带宽 | 最多{p['max_connections']}设备"
+                )
+                desc_html = (
+                    f"<p>有效期: {dur_str}</p>"
+                    f"<p>流量: {p['traffic_gb']}GB</p>"
+                    f"<p>带宽: {p['bandwidth_mbps']}Mbps</p>"
+                    f"<p>最大连接数: {p['max_connections']}</p>"
+                )
+                safe_name = p["name"].replace("'", "''")
+                insert_sql = (
+                    f"INSERT INTO goods (group_id, gd_name, gd_description, gd_keywords, "
+                    f"retail_price, actual_price, in_stock, sales_volume, ord, buy_limit_num, "
+                    f"buy_prompt, description, type, is_open, created_at, updated_at) VALUES ("
+                    f"{group_id}, '{safe_name}', '{desc_short}', 'VPN', "
+                    f"{p['price']:.2f}, {p['price']:.2f}, 999, 0, {idx + 1}, 0, "
+                    f"'购买成功后请妥善保存订阅链接，请勿分享给他人。', "
+                    f"'{desc_html}', 1, 1, NOW(), NOW())"
+                )
+                subprocess.run(
+                    ["docker", "exec", "payment-mysql", "mysql",
+                     "-uroot", f"-p{mysql_password}", "dujiaoka", "-e", insert_sql],
+                    capture_output=True, text=True, timeout=10,
+                )
+            print(f"\033[32m已自动创建 {len(plans)} 个VPN商品\033[0m")
+    except Exception as e:
+        print(f"\033[33m商品自动创建失败: {e}\033[0m")
+
+    # Restart dujiaoka to pick up all changes
+    subprocess.run(["docker", "restart", "dujiaoka"], capture_output=True, timeout=30)
 
     open_firewall_port(port, "tcp")
     print(f"\033[32m独角数卡已部署 (端口: {port})\033[0m")

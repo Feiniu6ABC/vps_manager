@@ -288,24 +288,28 @@ def action_install():
     print("  买家付 USDT → epusdt 检测到账 → 通知发卡平台发货")
     print()
     print("  需要: Docker (自动安装)、MySQL、Redis (自动部署)")
-    print("  TRON 钱包地址在 epusdt 部署完成后通过管理面板配置")
     print()
     ans = prompt("  是否现在部署 epusdt？(y/N): ").strip()
     epusdt_deployed = False
     if ans.lower() == "y":
         from installer import deploy_epusdt
+        tron_addr = prompt("  TRON 钱包地址 (回车跳过，稍后配置): ").strip()
+        tron_key = ""
+        if tron_addr:
+            tron_key = prompt("  TRON 钱包私钥: ").strip()
         epusdt_token = prompt("  epusdt API 密钥 (回车自动生成): ").strip()
         if not epusdt_token:
             import secrets as _s
             epusdt_token = _s.token_hex(16)
-        if deploy_epusdt("", "", epusdt_token, result['server_ip']):
+        if deploy_epusdt(tron_addr, tron_key, epusdt_token, result['server_ip']):
             db.set_config("epusdt_token", epusdt_token)
             epusdt_deployed = True
             green(f"  epusdt API 密钥: {epusdt_token}")
-            print()
-            yellow("  部署完成后配置 TRON 钱包:")
-            print(f"    打开 http://{result['server_ip']}:8000")
-            print(f"    通过 API 添加钱包地址 (参考部署指南)")
+            if tron_addr:
+                green(f"  TRON 钱包: {tron_addr}")
+            else:
+                print()
+                yellow("  TRON 钱包未配置，请稍后在数据库中添加")
     if not epusdt_deployed:
         yellow("  已跳过，可稍后在菜单 [13. 发卡平台] 部署")
 
@@ -345,27 +349,20 @@ def action_install():
                 print(f"    用户名: {djk_user}")
                 print(f"    密码: {djk_pass}")
                 print()
-                yellow("  后台配置支付和商品:")
+                epusdt_token = db.get_config("epusdt_token", "")
+                if epusdt_token:
+                    green("  epusdt 支付方式已自动配置!")
+                else:
+                    yellow("  后台配置支付 (对接 epusdt):")
+                    print(f"    后台 → 支付设置 → 添加支付方式")
                 print()
-                yellow("  配置支付 (对接 epusdt):")
-                epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
-                print(f"    后台 → 支付设置 → 添加支付方式:")
-                print(f"    名称: USDT")
-                print(f"    商户密钥: {epusdt_token}")
-                print(f"    支付网关: http://127.0.0.1:8000")
+                green("  VPN 商品已自动创建!")
+                yellow("  添加库存 (卡密):")
+                print(f"    方式1: vpn-manager 菜单 [13. 发卡平台] → [1. 批量生成卡密]")
+                print(f"    方式2: 独角数卡后台 → 商品管理 → 卡密 → 手动添加")
                 print()
-                yellow("  创建商品 (对接 vpn-manager API):")
-                api_secret = db.get_config("api_secret", "")
-                if not api_secret:
-                    import secrets as _s
-                    api_secret = _s.token_hex(20)
-                    db.set_config("api_secret", api_secret)
-                print(f"    后台 → 商品管理 → 添加商品:")
-                print(f"    发货方式: 第三方API发货")
-                print(f"    API 地址: http://127.0.0.1:{sub_port}/api/create")
-                print(f"    请求参数: {{\"secret\": \"{api_secret}\", \"plan_id\": 1}}")
-                print(f"    (plan_id: 1=单日¥2, 2=月卡¥15, 3=高级月卡¥25)")
-                print(f"    返回提取字段: sub_url")
+                yellow("  管理商品:")
+                print(f"    独角数卡后台 → 商品管理 (可修改名称/价格/描述)")
     if not djk_deployed:
         yellow("  已跳过，可稍后手动部署 (参考部署指南第六步)")
 
@@ -753,15 +750,60 @@ def action_protocol_menu():
         yellow("请执行 [刷新订阅] 使更改生效")
 
 
+def _import_cards_to_dujiaoka(plan_id: int, urls: list[str]):
+    """Auto-import generated card keys into dujiaoka's carmis table."""
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "--filter", "name=^dujiaoka$", "--format", "{{.Status}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if not r.stdout.strip() or "Up" not in r.stdout:
+            yellow("独角数卡未运行，卡密仅保存到文件")
+            return
+        mysql_password = db.get_config("mysql_password", "")
+        if not mysql_password:
+            return
+        # Find matching goods_id in dujiaoka (by ord = plan_id position)
+        r = subprocess.run(
+            ["docker", "exec", "payment-mysql", "mysql",
+             "-uroot", f"-p{mysql_password}", "dujiaoka", "-N",
+             "-e", f"SELECT id FROM goods WHERE ord={plan_id} LIMIT 1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        goods_id = r.stdout.strip()
+        if not goods_id:
+            # Fallback: use plan_id as goods_id directly
+            goods_id = str(plan_id)
+        # Batch insert card keys
+        values = ", ".join(
+            f"({goods_id}, 1, 0, '{url}', NOW(), NOW())" for url in urls
+        )
+        insert_sql = (
+            f"INSERT INTO carmis (goods_id, status, is_loop, carmi, created_at, updated_at) "
+            f"VALUES {values}"
+        )
+        r = subprocess.run(
+            ["docker", "exec", "payment-mysql", "mysql",
+             "-uroot", f"-p{mysql_password}", "dujiaoka", "-e", insert_sql],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            green(f"已自动导入 {len(urls)} 张卡密到独角数卡")
+        else:
+            yellow(f"自动导入失败: {(r.stderr or '')[:100]}")
+            yellow("请手动在独角数卡后台导入卡密文件")
+    except Exception as e:
+        yellow(f"自动导入跳过: {e}")
+
+
 def action_card_platform():
     print()
     green("  发卡平台对接")
     print("  " + "-" * 50)
-    print("  发卡平台 (如独角数卡) 通过 API 自动创建用户:")
-    print("  买家付款 → 发卡平台调用API → vpn-manager创建用户 → 返回订阅链接")
+    print("  通过独角数卡发卡: 生成卡密 → 导入独角数卡 → 买家购买自动发货")
     print()
-    print("  1. 批量生成卡密 (导出到文件，手动导入发卡平台)")
-    print("  2. 设置 Webhook API 密钥 (发卡平台自动对接用)")
+    print("  1. 批量生成卡密 (自动导入独角数卡)")
+    print("  2. 设置 Webhook API 密钥 (外部平台对接用)")
     print("  3. 查看 API 对接说明")
     print("  4. 部署 epusdt (USDT收款网关)")
     print("  5. 部署独角数卡 (发卡网站)")
@@ -792,11 +834,12 @@ def action_card_platform():
             f.write("\n".join(urls))
         green(f"\n生成 {count} 张 [{plan['name']}] 卡密")
         yellow(f"卡密文件: {card_file}")
-        yellow("每行一个订阅链接，直接导入发卡平台库存")
         for u in urls[:5]:
             print(f"  {u}")
         if len(urls) > 5:
             print(f"  ... (共 {len(urls)} 行)")
+        # Auto-import into dujiaoka if running
+        _import_cards_to_dujiaoka(pid, urls)
     elif c == "2":
         current = db.get_config("api_secret", "")
         if current:
@@ -818,17 +861,23 @@ def _deploy_epusdt_menu():
     print()
     yellow("  部署 epusdt (USDT-TRC20 自动收款)")
     print("  " + "-" * 50)
-    # Check service status
-    r = subprocess.run(["systemctl", "is-active", "epusdt"], capture_output=True, text=True, timeout=5)
-    if "active" in r.stdout:
-        green(f"  epusdt 状态: 运行中")
+    # Check Docker container status
+    r = subprocess.run(
+        ["docker", "ps", "--filter", "name=^epusdt$", "--format", "{{.Status}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.stdout.strip() and "Up" in r.stdout:
+        green(f"  epusdt 状态: 运行中 ({r.stdout.strip()})")
         ans = prompt("  是否重新部署？(y/N): ").strip()
         if ans.lower() != "y":
             return
     print()
     print("  epusdt 需要 Docker + MySQL + Redis (自动部署)")
-    print("  TRON 钱包地址在部署完成后通过 epusdt 管理面板配置")
     print()
+    tron_addr = prompt("  TRON 钱包地址 (回车跳过): ").strip()
+    tron_key = ""
+    if tron_addr:
+        tron_key = prompt("  TRON 钱包私钥: ").strip()
     token = prompt("  API 密钥 (回车自动生成): ").strip()
     if not token:
         import secrets as _s
@@ -838,11 +887,13 @@ def _deploy_epusdt_menu():
         server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
     except Exception:
         pass
-    if deploy_epusdt("", "", token, server_ip):
+    if deploy_epusdt(tron_addr, tron_key, token, server_ip):
         db.set_config("epusdt_token", token)
         green(f"\n  epusdt 部署成功!")
         print(f"  API 密钥: {token}")
         print(f"  地址: http://{server_ip}:8000")
+        if tron_addr:
+            green(f"  TRON 钱包: {tron_addr}")
         yellow("\n  在独角数卡后台配置支付时填入此密钥")
 
 
@@ -885,16 +936,18 @@ def _deploy_dujiaoka_menu():
             import secrets as _s
             api_secret = _s.token_hex(20)
             db.set_config("api_secret", api_secret)
-        epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
         print()
         green("  独角数卡部署成功! (已自动初始化)")
         print(f"    后台地址: http://{server_ip}:{port}/admin")
         print(f"    用户名: {admin_user}")
         print(f"    密码: {admin_pass}")
         print()
-        yellow("  后台配置支付 (对接 epusdt):")
-        print(f"    支付设置 → 添加 → 商户密钥: {epusdt_token}")
-        print(f"    支付网关: http://127.0.0.1:8000")
+        epusdt_token = db.get_config("epusdt_token", "")
+        if epusdt_token:
+            green("  epusdt 支付方式已自动配置!")
+        else:
+            yellow("  后台配置支付 (对接 epusdt):")
+            print(f"    支付设置 → 添加支付方式")
         print()
         yellow("  后台创建商品 (对接 vpn-manager):")
         print(f"    发货方式: 第三方API发货")

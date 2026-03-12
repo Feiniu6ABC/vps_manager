@@ -23,6 +23,10 @@ def install_shortcut():
     """Always ensure vpn-manager shortcut exists."""
     try:
         wrapper = f"#!/bin/bash\n/usr/bin/python3 {SCRIPT_PATH} \"$@\"\n"
+        # If shortcut is a symlink (old behavior), remove it to avoid
+        # overwriting the actual main.py through the symlink
+        if os.path.islink(SHORTCUT_PATH):
+            os.unlink(SHORTCUT_PATH)
         # Write or update shortcut
         need_write = True
         if os.path.exists(SHORTCUT_PATH):
