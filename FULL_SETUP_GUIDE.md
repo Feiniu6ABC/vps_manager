@@ -71,21 +71,40 @@ ssh root@1.2.3.4
   内容: 1.2.3.4
   代理: 开启 (橙色云朵)
 
-记录3 (订阅服务器 + 管理面板，不走 CF):
+记录3 (订阅服务器 + 管理面板，走 CF 获得 HTTPS):
   类型: A
-  名称: sub
+  名称: admin
   内容: 1.2.3.4
-  代理: 关闭 (灰色云朵)
+  代理: 开启 (橙色云朵)
 ```
 
-### 2.4 设置 SSL
+### 2.4 设置 SSL/TLS 加密模式
 
-Cloudflare 控制面板 → SSL/TLS → 选择 "Flexible"
+这一步很重要，选错了 CF CDN 备用线路会连不上。
+
+```
+1. 登录 Cloudflare → 选择你的域名 myvpn123.top
+2. 左侧菜单 → 点击 "SSL/TLS"
+3. 点击 "Overview" (概述)
+4. 找到加密模式 (Encryption mode)，点击 "Configure" (配置)
+5. 选择 "Flexible"
+6. 保存
+
+如果界面不同 (Cloudflare 经常改版)，也可以试:
+  SSL/TLS → Configuration (配置) → 加密模式下拉框 → Flexible
+```
+
+**为什么选 Flexible？**
+- Flexible = 访客→Cloudflare 加密，Cloudflare→你的服务器 不加密
+- 因为 VMess-WS 监听的是 HTTP 端口 (8880)，没有 TLS
+- 如果选 Full/Strict，Cloudflare 会尝试用 HTTPS 连你服务器，但服务器没有 HTTPS，会报 502 错误
+
+**注意**：如果你看到 "Off / Flexible / Full / Full (strict)" 四个选项，选 Flexible 就对了。
 
 完成后你有三个子域名:
-- `vpn.myvpn123.top` → CF CDN 备用线路
-- `shop.myvpn123.top` → 发卡网站
-- `sub.myvpn123.top` → 订阅服务器和管理面板
+- `vpn.myvpn123.top` → CF CDN 备用线路 (被墙时用)
+- `shop.myvpn123.top` → 发卡网站 (买家访问)
+- `admin.myvpn123.top` → 订阅服务器 + 管理面板 (HTTPS，端口 2096)
 
 ---
 
@@ -98,7 +117,7 @@ Cloudflare 控制面板 → SSL/TLS → 选择 "Flexible"
 scp -r vpn-manager/ root@1.2.3.4:/opt/vpn-manager/
 ```
 
-### 3.2 安装 sing-box
+### 3.2 一键安装
 
 SSH 连到 VPS:
 ```bash
@@ -107,60 +126,64 @@ cd /opt/vpn-manager
 python3 main.py --install
 ```
 
-安装向导交互:
+安装向导会分 4 步自动引导你完成所有配置:
+
+**第 1 步：安装 sing-box**
 ```
 选择安装的协议:
-  1. 仅 VLESS-Reality (推荐，最安全)      ← 输入 1 回车
-VLESS 端口 [443]:                         ← 直接回车用默认
-Reality SNI [www.microsoft.com]:          ← 直接回车用默认
+  1. 仅 VLESS-Reality (最隐蔽)
+  2. VLESS-Reality + VMess-WS (推荐，支持 CF CDN 备用)  ← 输入 2 回车
+  3. 全部协议
+  4. 自定义
+
+VLESS 端口 [443]:                    ← 直接回车用默认
+Reality SNI [www.microsoft.com]:     ← 直接回车用默认
 ```
 
 等待自动完成 (约1-2分钟):
-- 安装依赖 ✓
-- 启用 BBR ✓
+- 安装系统依赖 ✓
+- 启用 BBR 加速 ✓
 - 下载 sing-box (SHA256校验) ✓
-- 生成密钥 ✓
+- 生成密钥和证书 ✓
+- 配置防火墙 (自动开放端口) ✓
 - 启动服务 ✓
 
 安装完会显示分享链接和二维码。先用手机扫码测试能不能连上 VPN。
 
-### 3.3 配置 Cloudflare CDN 备用
+**第 2 步：配置 Cloudflare CDN 备用** (需要先完成第二步的 CF 设置)
+```
+输入你的 CF 域名 (如 vpn.myvpn123.top，回车跳过): vpn.myvpn123.top
+```
+如果还没配好 CF，直接回车跳过，之后可以在菜单 [16. sing-box 管理] → [5. 配置 CF 备用] 中设置。
 
-```bash
-vpn-manager
-# 输入 16 (sing-box 管理)
-# 输入 5  (配置 Cloudflare CDN 备用)
-# 输入域名: vpn.myvpn123.top
+**第 3 步：启动订阅服务器 + Web 管理面板**
+```
+订阅服务器端口 [8888]:    ← 直接回车用默认
+```
+自动启动订阅服务器，包含用户订阅分发、管理面板、发卡 API。
+
+**第 4 步：设置管理员密码**
+```
+设置管理员密码 (至少6位): xxxxxx
+确认密码: xxxxxx
 ```
 
-### 3.4 启动订阅服务器 + 管理面板
+**安装完成后自动显示汇总信息并进入管理菜单。**
 
-```bash
-vpn-manager
-# 输入 12 (订阅服务器)
-# 输入 1  (启动)
+### 3.3 后续配置 (在管理菜单中操作)
+
+安装完成后自动进入管理菜单，你可以进行以下操作:
+
+**配置服务器容量** (菜单 14):
 ```
-
-### 3.5 设置管理员密码
-
-```bash
-vpn-manager --set-admin-password
-# 输入密码 (至少6位)
-# 确认密码
-```
-
-### 3.6 配置服务器容量
-
-```bash
 vpn-manager
 # 输入 14 (服务器容量)
 # 输入你的 VPS 带宽: 例如 2500 (Mbps)
 # 输入月流量: 例如 1 (TB)
 ```
 
-### 3.7 设置 API 密钥 (发卡平台用)
-
-```bash
+**设置 API 密钥** (菜单 13，发卡平台对接用):
+```
 vpn-manager
 # 输入 13 (发卡平台)
 # 输入 2  (设置 Webhook API 密钥)
@@ -168,30 +191,30 @@ vpn-manager
 # 记下这个密钥，后面要用！比如: a1b2c3d4e5f6...
 ```
 
-### 3.8 开放防火墙端口
-
+**开放发卡网站和收款端口** (如果之后要部署独角数卡和 epusdt):
 ```bash
-ufw allow 443/tcp     # VLESS-Reality
-ufw allow 8880/tcp    # VMess-WS (CF备用)
-ufw allow 8888/tcp    # 订阅服务器 + 管理面板
 ufw allow 80/tcp      # 发卡网站
-ufw allow 8000/tcp    # epusdt 收款 (后面装)
-ufw enable
+ufw allow 8000/tcp    # epusdt 收款
 ```
+注意: VPN 相关端口 (443/8880/8888) 安装时已自动开放，无需手动操作。
 
-### 3.9 验证
+### 3.4 验证
 
-- 浏览器打开 `http://sub.myvpn123.top:8888/admin` → 应该看到登录页面
-- 输入你设置的管理员密码 → 进入管理面板
-- 手机客户端用分享链接连接 VPN → 应该能翻墙
+- 手机客户端用二维码/分享链接连接 VPN → 应该能翻墙
+- 浏览器打开 `https://admin.myvpn123.top:2096/admin` → HTTPS 访问管理面板
+  (或直连: `http://1.2.3.4:2096/admin`)
+- 输入管理员密码 → 进入管理面板
+- 之后可以用 `vpn-manager` 命令随时进入管理菜单
 
 ---
 
 ## 第四步：创建 TRON 钱包 (收 USDT 用)
 
+**在安装向导第 5 步之前完成此步骤。**
+
 ### 4.1 安装 TokenPocket
 
-手机下载 TokenPocket (官网: https://www.tokenpocket.pro)
+手机下载 TokenPocket (官网: https://www.tokenpocket.pro)，无需手机号注册。
 
 ### 4.2 创建钱包
 
@@ -211,7 +234,7 @@ ufw enable
 钱包主页 → 右上角 "+" → 搜索 "USDT" → 选择 USDT (TRC-20) → 添加
 ```
 
-### 4.4 记录两个关键信息
+### 4.4 记录两个关键信息 (安装向导第5步需要)
 
 ```
 收款地址:
@@ -223,9 +246,9 @@ ufw enable
   得到一串很长的十六进制字符串
 ```
 
-把这两个值记到安全的地方，下一步要用。
+把这两个值记到安全的地方，安装脚本第 5 步会用到。
 
-### 4.5 充值少量 TRX (手续费)
+### 4.5 充值少量 TRX (链上手续费)
 
 ```
 打开币安 App
@@ -240,136 +263,81 @@ ufw enable
 
 ---
 
-## 第五步：部署 epusdt (USDT 自动收款)
+## 第五步：部署 epusdt + 独角数卡 (自动收款 + 发卡网站)
 
-### 5.1 安装 Docker (如果没有)
-
-SSH 连到 VPS:
-```bash
-curl -fsSL https://get.docker.com | sh
-systemctl enable docker
-systemctl start docker
-```
-
-### 5.2 创建 epusdt 配置
+**安装脚本已集成此步骤。** 如果之前安装时跳过了，可以在管理菜单中部署:
 
 ```bash
-mkdir -p /opt/epusdt && cd /opt/epusdt
-
-cat > .env << 'EOF'
-app_name=epusdt
-app_uri=http://sub.myvpn123.top:8000
-app_debug=false
-
-# 数据库 (用 SQLite，最简单)
-db_driver=sqlite
-
-# 你的 TRON 钱包信息 (从 TokenPocket 获取的)
-tron_address=TJfKxxxxxxxxxxxxxxxxxxxxxxxxxx
-tron_private_key=你的私钥粘贴在这里
-
-# API 密钥 (随便设一个，独角数卡连接用)
-api_auth_token=epusdt_secret_123
-
-# 汇率
-usdt_rate=7.2
-
-# 订单过期时间 (秒)
-order_expiration_time=600
-EOF
+vpn-manager
+# 输入 13 (发卡平台)
+# 输入 4  (部署 epusdt)
+#   → 输入 TRON 收款地址和私钥
+#   → 自动安装 Docker、部署 epusdt、开放端口
+#
+# 输入 5  (部署独角数卡)
+#   → 自动部署，然后按提示在浏览器完成初始化
 ```
 
-### 5.3 启动 epusdt
+### 5.1 epusdt 部署后
 
-```bash
-docker run -d \
-  --name epusdt \
-  --restart always \
-  -p 8000:8000 \
-  -v /opt/epusdt/.env:/app/.env \
-  -v /opt/epusdt/data:/app/data \
-  dontcry/epusdt:latest
-```
+epusdt 会自动:
+- 安装 Docker (如果没有)
+- 拉取 epusdt 镜像并启动
+- 开放 8000 端口
+- 生成 API 密钥
 
-### 5.4 验证
+### 5.2 独角数卡初始化 (需要在浏览器操作)
 
-浏览器打开 `http://1.2.3.4:8000` → 应该看到 epusdt 页面
+部署完成后，打开浏览器完成初始化:
 
----
-
-## 第六步：部署独角数卡 (发卡网站)
-
-### 6.1 安装
-
-```bash
-mkdir -p /opt/dujiaoka && cd /opt/dujiaoka
-
-# docker-compose.yml
-cat > docker-compose.yml << 'EOF'
-version: '3'
-services:
-  web:
-    image: stilleshan/dujiaoka:latest
-    ports:
-      - "80:80"
-    volumes:
-      - ./data:/dujiaoka
-    environment:
-      - INSTALL=true
-    restart: always
-EOF
-
-docker compose up -d
-```
-
-### 6.2 初始化
-
-1. 浏览器打开 `http://shop.myvpn123.top`
+1. 打开 `http://你的IP:80`
 2. 按安装向导设置:
    - 网站名称: 比如 "VPN Store"
    - 管理员账号密码: 自己设
    - 数据库选 SQLite (最简单)
-3. 安装完成后登录后台: `http://shop.myvpn123.top/admin`
+3. 安装完成后登录后台: `http://你的IP:80/admin`
 
-### 6.3 配置支付 (对接 epusdt)
+### 5.3 配置支付 (对接 epusdt)
+
+安装脚本会显示具体的密钥值，按提示在独角数卡后台填入:
 
 ```
 后台 → 系统设置 → 支付设置 → 添加支付方式:
   名称: USDT
   支付通道: 自定义 / epusdt
   商户ID: 随便填
-  商户密钥: epusdt_secret_123  (和 epusdt 的 api_auth_token 一致)
-  支付网关: http://127.0.0.1:8000   (epusdt 地址)
+  商户密钥: (安装脚本显示的 epusdt API 密钥)
+  支付网关: http://127.0.0.1:8000
   启用: 是
 ```
 
-### 6.4 创建商品 (对接 vpn-manager API)
+### 5.4 创建商品 (对接 vpn-manager API)
 
-创建三个商品，对应三个套餐:
+安装脚本同样会显示 API 密钥和地址，按提示创建三个商品:
 
 ```
+后台 → 商品管理 → 添加商品:
+
 商品1: VPN 单日套餐
 ├── 价格: 2.00 (元)
 ├── 发货方式: 第三方API发货
-├── API 地址: http://127.0.0.1:8888/api/create
-├── 请求方式: POST
-├── 请求参数 (JSON):
-│   {"secret": "你的vpn-manager密钥", "plan_id": 1}
+├── API 地址: http://127.0.0.1:2096/api/create
+├── 请求参数: {"secret": "安装脚本显示的密钥", "plan_id": 1}
 ├── 返回提取字段: sub_url
 └── 显示给买家: "您的VPN订阅链接 (复制到V2rayN等客户端使用)"
 
 商品2: VPN 月卡
 ├── 价格: 15.00
-├── API 地址: http://127.0.0.1:8888/api/create
-├── 请求参数: {"secret": "你的vpn-manager密钥", "plan_id": 2}
+├── 请求参数: {"secret": "同上", "plan_id": 2}
 └── 其他同上
 
 商品3: VPN 高级月卡
 ├── 价格: 25.00
-├── API 地址: http://127.0.0.1:8888/api/create
-├── 请求参数: {"secret": "你的vpn-manager密钥", "plan_id": 3}
+├── 请求参数: {"secret": "同上", "plan_id": 3}
 └── 其他同上
 ```
+
+也可以随时在菜单 13 → 3 查看完整的 API 配置信息。
 
 ---
 
@@ -384,7 +352,7 @@ docker compose up -d
 5. 页面显示一个 TRON 地址和金额 (约 0.28 USDT)
 6. 用另一个钱包 (或币安) 转这个金额的 USDT 到显示的地址
 7. 等待 10-30 秒确认
-8. 页面自动跳转显示: "您的订阅链接: http://sub.myvpn123.top:8888/sub/xxxxxx"
+8. 页面自动跳转显示: "您的订阅链接: http://admin.myvpn123.top:2096/sub/xxxxxx"
 
 ### 7.2 验证订阅可用
 
@@ -397,7 +365,7 @@ docker compose up -d
 
 ### 7.3 检查管理面板
 
-打开 `http://sub.myvpn123.top:8888/admin`:
+打开 `http://admin.myvpn123.top:2096/admin`:
 - 概览页应该显示 1 个活跃用户
 - 营收显示 ¥2.00
 - 操作日志有记录
@@ -414,7 +382,7 @@ docker compose up -d
 ```bash
 vpn-manager --status
 ```
-或者打开管理面板 `http://sub.myvpn123.top:8888/admin`
+或者打开管理面板 `http://admin.myvpn123.top:2096/admin`
 
 ### 提现到币安
 ```
@@ -452,7 +420,7 @@ cp /etc/vpn-manager/vpn-manager.db /root/backup-$(date +%Y%m%d).db
   │                                        │
   │                              通知独角数卡"已付款"
   │                                        │
-  │                              独角数卡调用 API ──→ vpn-manager (:8888)
+  │                              独角数卡调用 API ──→ vpn-manager (:2096)
   │                                                      │
   │                              返回订阅链接 ←──────────┘
   │     ▲                            │
@@ -468,7 +436,7 @@ cp /etc/vpn-manager/vpn-manager.db /root/backup-$(date +%Y%m%d).db
 
 你 (管理员)
   │
-  ├── 管理面板: http://sub.myvpn123.top:8888/admin
+  ├── 管理面板: http://admin.myvpn123.top:2096/admin
   │     └── 查看用户、营收、在线状态、系统健康
   │
   ├── SSH 命令行: vpn-manager
@@ -485,7 +453,7 @@ cp /etc/vpn-manager/vpn-manager.db /root/backup-$(date +%Y%m%d).db
 |------|------|------|
 | 443 | sing-box VLESS-Reality | 用户VPN连接 (直连) |
 | 8880 | sing-box VMess-WS | 用户VPN连接 (CF CDN备用) |
-| 8888 | vpn-manager 订阅服务器 | 订阅分发 + 管理面板 + API |
+| 2096 | vpn-manager 订阅服务器 | 订阅分发 + 管理面板 + API (CF HTTPS) |
 | 80 | 独角数卡 | 发卡网站 (买家访问) |
 | 8000 | epusdt | USDT 收款网关 |
 | 22 | SSH | 你的管理连接 |

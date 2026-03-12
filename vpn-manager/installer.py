@@ -49,6 +49,11 @@ DEFAULT_VMESS_PORT = 8880
 DEFAULT_HY2_PORT = 8443
 DEFAULT_TUIC_PORT = 8844
 DEFAULT_ANYTLS_PORT = 8845
+DEFAULT_SUB_PORT = 2096  # CF-supported HTTPS port
+
+# Cloudflare supported HTTPS ports (for reference)
+CF_HTTPS_PORTS = {443, 2053, 2083, 2087, 2096, 8443}
+CF_HTTP_PORTS = {80, 8080, 8880, 2052, 2082, 2086, 2095}
 
 REQUIRED_PACKAGES_APT = ["curl", "openssl", "jq", "iptables", "qrencode", "python3", "cron", "iproute2"]
 REQUIRED_PACKAGES_ALPINE = ["curl", "openssl", "jq", "iptables", "qrencode", "python3", "iproute2"]
@@ -737,21 +742,148 @@ def configure_firewall(
     print(f"\033[32m防火墙已放行: {', '.join(opened)}\033[0m")
 
 
+# ==================== Config Cleanup ====================
+
+def clean_configs():
+    """
+    Auto-fix common config issues across all config files:
+    - Remove duplicate inbounds (same tag)
+    - Remove duplicate outbounds (same tag)
+    - Remove duplicate route rules
+    """
+    from singbox import load_sb_config, save_sb_config
+
+    fixed = False
+    for config_path in [SB_CONFIG_10, SB_CONFIG_11]:
+        cfg = load_sb_config(config_path)
+        if not cfg:
+            continue
+
+        changed = False
+
+        # Deduplicate inbounds by tag
+        seen_tags = set()
+        clean_inbounds = []
+        for ib in cfg.get("inbounds", []):
+            tag = ib.get("tag", "")
+            if tag and tag in seen_tags:
+                changed = True
+                continue
+            seen_tags.add(tag)
+            clean_inbounds.append(ib)
+        if changed:
+            cfg["inbounds"] = clean_inbounds
+
+        # Deduplicate outbounds by tag
+        seen_tags = set()
+        clean_outbounds = []
+        for ob in cfg.get("outbounds", []):
+            tag = ob.get("tag", "")
+            if tag and tag in seen_tags:
+                changed = True
+                continue
+            seen_tags.add(tag)
+            clean_outbounds.append(ob)
+        if changed:
+            cfg["outbounds"] = clean_outbounds
+
+        if changed:
+            save_sb_config(config_path, cfg)
+            fixed = True
+
+    if fixed:
+        print("\033[33m已自动修复配置文件中的重复项\033[0m")
+    return fixed
+
+
 # ==================== Validation ====================
 
 def validate_config() -> bool:
-    """Validate the current sing-box config."""
+    """Validate the current sing-box config. Auto-fixes common issues on failure."""
     r = subprocess.run(
         [str(SB_BIN), "check", "-c", str(SB_CONFIG)],
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
-        print(f"\033[31m配置验证失败: {r.stderr.strip()}\033[0m")
+        err = r.stderr.strip()
+        # Auto-fix: duplicate inbound/outbound tags
+        if "duplicate" in err:
+            clean_configs()
+            r = subprocess.run(
+                [str(SB_BIN), "check", "-c", str(SB_CONFIG)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True
+            err = r.stderr.strip()
+
+        # Auto-fix: legacy DNS format (upgrading from older version)
+        if "legacy DNS" in err or "ENABLE_DEPRECATED" in err:
+            migrate_config_for_version()
+            r = subprocess.run(
+                [str(SB_BIN), "check", "-c", str(SB_CONFIG)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True
+            err = r.stderr.strip()
+
+        # Auto-fix: dns outbound removed in 1.13
+        if "dns outbound" in err:
+            migrate_config_for_version()
+            r = subprocess.run(
+                [str(SB_BIN), "check", "-c", str(SB_CONFIG)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True
+            err = r.stderr.strip()
+
+        # Auto-fix: missing default_domain_resolver
+        if "default_domain_resolver" in err:
+            migrate_config_for_version()
+            r = subprocess.run(
+                [str(SB_BIN), "check", "-c", str(SB_CONFIG)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True
+            err = r.stderr.strip()
+
+        print(f"\033[31m配置验证失败: {err}\033[0m")
     return r.returncode == 0
 
 
 def validate_port(port: int) -> bool:
     return 1 <= port <= 65535
+
+
+def check_port_conflict(port: int, exclude_service: str = "") -> str | None:
+    """Check if port is in use. Returns conflict description or None."""
+    try:
+        r = subprocess.run(
+            ["ss", "-tlnp", f"sport = :{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in r.stdout.splitlines()[1:]:  # Skip header
+            if exclude_service and exclude_service in line:
+                continue
+            if f":{port}" in line:
+                return line.strip()
+    except Exception:
+        pass
+    return None
+
+
+def find_available_cf_https_port(used_ports: set[int] = None) -> int:
+    """Find an available CF-supported HTTPS port."""
+    if used_ports is None:
+        used_ports = set()
+    preferred = [2096, 2083, 2053, 2087, 8443]
+    for port in preferred:
+        if port not in used_ports and not check_port_conflict(port):
+            return port
+    return 2096  # fallback
 
 
 def validate_domain(domain: str) -> bool:
@@ -823,7 +955,8 @@ def full_install(
         hy2_port=hy2_port, tuic_port=tuic_port, anytls_port=anytls_port,
     )
 
-    # 10. Validate config
+    # 10. Clean & validate config
+    clean_configs()
     if not validate_config():
         raise RuntimeError("配置验证失败，请检查参数")
 
@@ -912,9 +1045,13 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
             },
         }
 
-        for config_path in [SB_CONFIG, SB_CONFIG_10, SB_CONFIG_11]:
+        # Only modify actual config files, not the symlink (SB_CONFIG → SB_CONFIG_11)
+        for config_path in [SB_CONFIG_10, SB_CONFIG_11]:
             c = load_sb_config(config_path)
             if not c:
+                continue
+            # Skip if vmess already exists in this file
+            if any(ib.get("type") == "vmess" for ib in c.get("inbounds", [])):
                 continue
             # Insert VMess after VLESS (index 1)
             inbounds = c.get("inbounds", [])
@@ -928,11 +1065,14 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
     else:
         print(f"\033[33mVMess-WS 已存在 (路径: {vmess_path})\033[0m")
 
+    # Clean up any duplicates before validation
+    clean_configs()
+
     # Save CF domain to database
     import database as db_mod
     db_mod.set_config("cf_domain", domain)
 
-    # Validate and restart
+    # Validate and restart (validate_config auto-fixes common issues)
     if validate_config():
         restart_service()
         print(f"\033[32mCloudflare CDN 备用已配置\033[0m")
@@ -955,6 +1095,129 @@ def add_cf_backup(domain: str, vmess_port: int = DEFAULT_VMESS_PORT):
         print("\033[31m配置验证失败，请检查\033[0m")
 
     return vmess_path
+
+
+# ==================== Docker & Payment Deployment ====================
+
+def install_docker():
+    """Install Docker if not present."""
+    if shutil.which("docker"):
+        print("\033[33mDocker 已安装\033[0m")
+        return True
+
+    print("\033[33m安装 Docker...\033[0m")
+    try:
+        r = subprocess.run(
+            ["bash", "-c", "curl -fsSL https://get.docker.com | sh"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            print(f"\033[31mDocker 安装失败: {r.stderr[:200]}\033[0m")
+            return False
+
+        subprocess.run(["systemctl", "enable", "docker"], capture_output=True, timeout=10)
+        subprocess.run(["systemctl", "start", "docker"], capture_output=True, timeout=15)
+        print("\033[32mDocker 安装成功\033[0m")
+        return True
+    except Exception as e:
+        print(f"\033[31mDocker 安装失败: {e}\033[0m")
+        return False
+
+
+def deploy_epusdt(
+    tron_address: str,
+    tron_private_key: str,
+    api_token: str = "epusdt_secret_123",
+    server_domain: str = "",
+    port: int = 8000,
+):
+    """Deploy epusdt USDT payment gateway via Docker."""
+    epusdt_dir = Path("/opt/epusdt")
+    epusdt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already running
+    r = subprocess.run(
+        ["docker", "ps", "--filter", "name=epusdt", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "epusdt" in r.stdout:
+        print("\033[33mepusdt 已在运行，重新部署...\033[0m")
+        subprocess.run(["docker", "stop", "epusdt"], capture_output=True, timeout=15)
+        subprocess.run(["docker", "rm", "epusdt"], capture_output=True, timeout=10)
+
+    # Detect server IP if no domain
+    if not server_domain:
+        try:
+            server_domain = (SB_DIR / "server_ipcl.log").read_text().strip()
+        except Exception:
+            server_domain = "127.0.0.1"
+
+    # Write .env config
+    env_content = f"""app_name=epusdt
+app_uri=http://{server_domain}:{port}
+app_debug=false
+db_driver=sqlite
+tron_address={tron_address}
+tron_private_key={tron_private_key}
+api_auth_token={api_token}
+usdt_rate=7.2
+order_expiration_time=600
+"""
+    (epusdt_dir / ".env").write_text(env_content)
+    os.chmod(str(epusdt_dir / ".env"), 0o600)
+
+    # Run Docker container
+    r = subprocess.run([
+        "docker", "run", "-d",
+        "--name", "epusdt",
+        "--restart", "always",
+        "-p", f"{port}:8000",
+        "-v", f"{epusdt_dir}/.env:/app/.env",
+        "-v", f"{epusdt_dir}/data:/app/data",
+        "dontcry/epusdt:latest",
+    ], capture_output=True, text=True, timeout=120)
+
+    if r.returncode != 0:
+        print(f"\033[31mepusdt 部署失败: {r.stderr[:200]}\033[0m")
+        return False
+
+    open_firewall_port(port, "tcp")
+    print(f"\033[32mepusdt 已部署 (端口: {port})\033[0m")
+    return True
+
+
+def deploy_dujiaoka(port: int = 80):
+    """Deploy 独角数卡 card selling platform via Docker."""
+    djk_dir = Path("/opt/dujiaoka")
+    djk_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already running
+    r = subprocess.run(
+        ["docker", "ps", "--filter", "name=dujiaoka", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "dujiaoka" in r.stdout:
+        print("\033[33m独角数卡已在运行，重新部署...\033[0m")
+        subprocess.run(["docker", "stop", "dujiaoka"], capture_output=True, timeout=15)
+        subprocess.run(["docker", "rm", "dujiaoka"], capture_output=True, timeout=10)
+
+    r = subprocess.run([
+        "docker", "run", "-d",
+        "--name", "dujiaoka",
+        "--restart", "always",
+        "-p", f"{port}:80",
+        "-v", f"{djk_dir}/data:/dujiaoka",
+        "-e", "INSTALL=true",
+        "stilleshan/dujiaoka:latest",
+    ], capture_output=True, text=True, timeout=120)
+
+    if r.returncode != 0:
+        print(f"\033[31m独角数卡部署失败: {r.stderr[:200]}\033[0m")
+        return False
+
+    open_firewall_port(port, "tcp")
+    print(f"\033[32m独角数卡已部署 (端口: {port})\033[0m")
+    return True
 
 
 # ==================== Config Migration ====================

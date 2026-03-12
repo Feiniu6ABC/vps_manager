@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import MANAGER_DIR, SB_CONFIG, SB_BIN
 import database as db
 
+SCRIPT_PATH = os.path.abspath(__file__)
+SHORTCUT_PATH = "/usr/bin/vpn-manager"
+
 
 def check_root():
     if os.geteuid() != 0:
@@ -16,8 +19,65 @@ def check_root():
         sys.exit(1)
 
 
+def install_shortcut():
+    """Always ensure vpn-manager shortcut exists."""
+    try:
+        wrapper = f"#!/bin/bash\n/usr/bin/python3 {SCRIPT_PATH} \"$@\"\n"
+        # Write or update shortcut
+        need_write = True
+        if os.path.exists(SHORTCUT_PATH):
+            with open(SHORTCUT_PATH) as f:
+                need_write = f.read() != wrapper
+        if need_write:
+            with open(SHORTCUT_PATH, "w") as f:
+                f.write(wrapper)
+            os.chmod(SHORTCUT_PATH, 0o755)
+    except Exception:
+        pass
+
+
+def setup_cron():
+    """Ensure traffic checking cron job exists."""
+    cron_line = f"*/3 * * * * root /usr/bin/python3 {SCRIPT_PATH} --check >/dev/null 2>&1"
+    crontab_path = "/etc/crontab"
+    try:
+        content = open(crontab_path).read()
+        if "--check" not in content:
+            with open(crontab_path, "a") as f:
+                f.write(f"\n{cron_line}\n")
+            print("\033[32m流量检查定时任务已设置 (每3分钟)\033[0m")
+    except Exception:
+        pass
+
+
+def import_existing_uuid():
+    """Import existing sing-box UUID on first run."""
+    if not SB_CONFIG.exists():
+        return
+    import singbox
+    cfg = singbox.load_sb_config(SB_CONFIG)
+    if not cfg:
+        return
+    inbounds = cfg.get("inbounds", [])
+    if not inbounds or not inbounds[0].get("users"):
+        return
+    existing_uuid = inbounds[0]["users"][0].get("uuid", "")
+    if not existing_uuid:
+        return
+    with db.get_db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if count > 0:
+        return
+    print(f"\033[33m检测到现有 UUID: {existing_uuid}\033[0m")
+    ans = input("\033[33m是否导入为管理员用户？(Y/n): \033[0m")
+    if not ans or ans.lower() == "y":
+        from services import import_existing_uuid as do_import
+        do_import(existing_uuid)
+        print("\033[32m管理员用户已导入\033[0m")
+
+
 def first_run_init():
-    """Initialize on first run."""
+    """Full initialization after sing-box is installed."""
     db.init_db()
 
     # Migrate from old JSON files if they exist
@@ -25,48 +85,8 @@ def first_run_init():
         db.migrate_from_json()
         print("\033[32m已从旧 JSON 文件迁移数据\033[0m")
 
-    # Import existing sing-box UUID if sing-box is installed
-    if SB_CONFIG.exists():
-        import singbox
-        cfg = singbox.load_sb_config(SB_CONFIG)
-        if cfg:
-            inbounds = cfg.get("inbounds", [])
-            if inbounds and inbounds[0].get("users"):
-                existing_uuid = inbounds[0]["users"][0].get("uuid", "")
-                if existing_uuid:
-                    with db.get_db() as conn:
-                        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-                    if count == 0:
-                        print(f"\033[33m检测到现有 UUID: {existing_uuid}\033[0m")
-                        ans = input("\033[33m是否导入为管理员用户？(Y/n): \033[0m")
-                        if not ans or ans.lower() == "y":
-                            from services import import_existing_uuid
-                            import_existing_uuid(existing_uuid)
-                            print("\033[32m管理员用户已导入\033[0m")
-
-    # Setup cron for traffic checking
-    cron_line = f"*/3 * * * * root /usr/bin/python3 {os.path.abspath(__file__)} --check >/dev/null 2>&1"
-    crontab_path = "/etc/crontab"
-    try:
-        content = open(crontab_path).read()
-        if "vpn-manager" not in content and "--check" not in content:
-            with open(crontab_path, "a") as f:
-                f.write(f"\n{cron_line}\n")
-            print("\033[32m流量检查定时任务已设置 (每3分钟)\033[0m")
-    except Exception:
-        pass
-
-    # Install symlink
-    link_path = "/usr/bin/vpn-manager"
-    script_path = os.path.abspath(__file__)
-    try:
-        if not os.path.exists(link_path):
-            wrapper = f"#!/bin/bash\n/usr/bin/python3 {script_path} \"$@\"\n"
-            with open(link_path, "w") as f:
-                f.write(wrapper)
-            os.chmod(link_path, 0o755)
-    except Exception:
-        pass
+    import_existing_uuid()
+    setup_cron()
 
 
 def main():
@@ -74,14 +94,26 @@ def main():
     MANAGER_DIR.mkdir(parents=True, exist_ok=True)
     db.init_db()
 
+    # Always ensure shortcut is installed
+    install_shortcut()
+
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
 
-        # Commands that DON'T require sing-box to be installed
+        # Commands that DON'T require sing-box
         if cmd == "--install":
             from cli import action_install
             action_install()
+            # After install, do full init then enter menu
+            if SB_BIN.exists():
+                first_run_init()
+                print()
+                print("\033[32m安装完成！进入管理菜单...\033[0m")
+                print()
+                from cli import main_menu
+                main_menu()
             return
+
         elif cmd == "--uninstall":
             from installer import uninstall
             confirm = input("\033[31m确认卸载 sing-box 和 vpn-manager？所有数据将被备份。(y/N): \033[0m")
@@ -91,7 +123,7 @@ def main():
 
         # Commands that require sing-box
         if not SB_BIN.exists():
-            print("\033[31m未检测到 sing-box，请先执行安装: vpn-manager --install\033[0m")
+            print("\033[31m未检测到 sing-box，请先执行: python3 main.py --install\033[0m")
             sys.exit(1)
 
         if cmd == "--sync":
@@ -133,20 +165,19 @@ def main():
             color = "\033[32m" if status == "active" else "\033[31m"
             print(f"sing-box v{ver}: {color}{status}\033[0m")
         else:
-            print(f"Unknown command: {cmd}")
-            print("Usage: vpn-manager [--install|--uninstall|--upgrade|--sync|--check|")
-            print("                    --gen-subs|--init|--server|--set-admin-password|--status]")
+            print(f"未知命令: {cmd}")
+            print("用法: vpn-manager [--install|--uninstall|--upgrade|--sync|--check|")
+            print("                   --gen-subs|--server|--set-admin-password|--status]")
             sys.exit(1)
     else:
         # Interactive menu
         if not SB_BIN.exists():
-            print("\033[33m未检测到 sing-box，是否安装？\033[0m")
-            ans = input("\033[33m(Y/n): \033[0m")
-            if not ans or ans.lower() == "y":
-                from cli import action_install
-                action_install()
-            else:
-                sys.exit(0)
+            print("\033[33m未检测到 sing-box，开始安装...\033[0m")
+            print()
+            from cli import action_install
+            action_install()
+            if not SB_BIN.exists():
+                sys.exit(1)
 
         first_run_init()
         from cli import main_menu

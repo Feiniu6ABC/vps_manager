@@ -24,9 +24,10 @@ def prompt(msg: str) -> str:
 # ==================== Installation ====================
 
 def action_install():
-    """Interactive sing-box installation."""
+    """Interactive sing-box installation wizard - all-in-one setup."""
     from installer import (
         full_install, detect_arch, detect_os, get_installed_version,
+        open_firewall_port, validate_domain,
         DEFAULT_VLESS_PORT, DEFAULT_REALITY_SNI,
         DEFAULT_VMESS_PORT, DEFAULT_HY2_PORT, DEFAULT_TUIC_PORT, DEFAULT_ANYTLS_PORT,
     )
@@ -41,18 +42,28 @@ def action_install():
 
     print()
     green("=" * 60)
-    green("  sing-box 安装向导")
+    green("  VPN Manager 一键安装向导")
     green("=" * 60)
     print(f"  系统: {detect_os()} | 架构: {detect_arch()}")
     print()
+    yellow("  本向导将依次完成:")
+    print("    [1] 安装 sing-box 代理核心")
+    print("    [2] 配置 Cloudflare CDN 备用线路 (可选)")
+    print("    [3] 启动订阅服务器 + Web 管理面板")
+    print("    [4] 设置管理员密码")
+    print()
 
-    # Protocol selection
+    # ==================== Step 1: Protocol & Install ====================
+    green("─" * 60)
+    green("  第 1 步: 安装 sing-box")
+    green("─" * 60)
+    print()
     yellow("选择安装的协议:")
-    print("  1. 仅 VLESS-Reality (推荐，最安全)")
-    print("  2. VLESS-Reality + VMess-WS")
-    print("  3. 全部协议")
+    print("  1. 仅 VLESS-Reality (推荐，最隐蔽)")
+    print("  2. VLESS-Reality + VMess-WS (推荐，支持 CF CDN 备用)")
+    print("  3. 全部协议 (VLESS + VMess + Hysteria2 + TUIC + AnyTLS)")
     print("  4. 自定义")
-    proto_choice = prompt("请选择 [1-4] (默认1): ") or "1"
+    proto_choice = prompt("请选择 [1-4] (默认2): ") or "2"
 
     vless_port = DEFAULT_VLESS_PORT
     vmess_port = 0
@@ -67,13 +78,13 @@ def action_install():
         tuic_port = DEFAULT_TUIC_PORT
         anytls_port = DEFAULT_ANYTLS_PORT
     if proto_choice == "4":
-        ans = prompt(f"启用 VMess-WS? (y/N): ")
+        ans = prompt("启用 VMess-WS? (y/N): ")
         if ans.lower() == "y": vmess_port = DEFAULT_VMESS_PORT
-        ans = prompt(f"启用 Hysteria2? (y/N): ")
+        ans = prompt("启用 Hysteria2? (y/N): ")
         if ans.lower() == "y": hy2_port = DEFAULT_HY2_PORT
-        ans = prompt(f"启用 TUIC? (y/N): ")
+        ans = prompt("启用 TUIC? (y/N): ")
         if ans.lower() == "y": tuic_port = DEFAULT_TUIC_PORT
-        ans = prompt(f"启用 AnyTLS? (y/N): ")
+        ans = prompt("启用 AnyTLS? (y/N): ")
         if ans.lower() == "y": anytls_port = DEFAULT_ANYTLS_PORT
 
     # Port customization
@@ -103,6 +114,250 @@ def action_install():
 
     # Display results
     _show_install_result(result)
+
+    # ==================== Step 2: Cloudflare CDN Backup ====================
+    print()
+    green("─" * 60)
+    green("  第 2 步: Cloudflare CDN 备用线路 (防 IP 被墙)")
+    green("─" * 60)
+    print()
+    print("  当 VPS 的 IP 被 GFW 封锁时，流量可通过 Cloudflare CDN 中转")
+    print("  需要提前准备:")
+    print("    1. 一个域名 (任意域名商购买，推荐 Namesilo / Cloudflare)")
+    print("    2. 域名已托管到 Cloudflare (使用 Cloudflare 的 DNS)")
+    print()
+    yellow("  Cloudflare 配置方法:")
+    print(f"    1. 登录 cloudflare.com → 选择你的域名")
+    print(f"    2. DNS → 添加 A 记录:")
+    print(f"       名称: vpn (或任意子域名)")
+    print(f"       内容: {result['server_ip']}")
+    print(f"       代理状态: 已代理 (橙色云朵，必须开启)")
+    print(f"    3. SSL/TLS → Overview → 加密模式选择 Flexible")
+    print(f"       (左侧菜单 SSL/TLS → 点击 Configure → 选 Flexible)")
+    print()
+
+    if vmess_port > 0:
+        cf_domain = prompt("  输入你的 CF 域名 (如 vpn.example.com，回车跳过): ").strip()
+        if cf_domain and validate_domain(cf_domain):
+            try:
+                from installer import add_cf_backup
+                add_cf_backup(cf_domain)
+                import json as _json
+                protos = db.get_config_json("protocols", ["vless-reality"])
+                if "vmess-ws" not in protos:
+                    protos.append("vmess-ws")
+                    db.set_config("protocols", _json.dumps(protos))
+                green("  CF CDN 备用已配置!")
+            except Exception as e:
+                red(f"  CF 配置失败: {e}")
+                yellow("  可稍后在菜单 [16. sing-box 管理] 中配置")
+        elif cf_domain:
+            red("  域名格式无效，已跳过")
+            yellow("  可稍后在菜单 [16. sing-box 管理] → [5. 配置 CF 备用] 中配置")
+        else:
+            yellow("  已跳过，可稍后在菜单 [16. sing-box 管理] 中配置")
+    else:
+        yellow("  未启用 VMess-WS 协议，CF CDN 备用需要 VMess-WS")
+        yellow("  如需启用，可重新安装时选择选项 2 或 3")
+
+    # ==================== Step 3: Subscription Server ====================
+    print()
+    green("─" * 60)
+    green("  第 3 步: 启动订阅服务器 + Web 管理面板")
+    green("─" * 60)
+    print()
+    print("  订阅服务器用于:")
+    print("    - 分发用户订阅链接 (客户端自动更新节点)")
+    print("    - Web 管理面板 (浏览器管理用户/查看统计)")
+    print("    - 发卡平台 API 接口 (对接自动售卡)")
+    print()
+    print("  端口 2096 是 Cloudflare 支持的 HTTPS 端口")
+    print("  配合 CF 代理，管理面板可通过 HTTPS 访问，且隐藏服务器 IP")
+    print()
+
+    from installer import DEFAULT_SUB_PORT, check_port_conflict, find_available_cf_https_port
+
+    # Find best available port
+    used_ports = {vless_port, vmess_port, hy2_port, tuic_port, anytls_port}
+    default_sub = str(find_available_cf_https_port(used_ports))
+    sub_port = db.get_config("sub_port", default_sub)
+    # If old default 8888, suggest switching to CF HTTPS port
+    if sub_port == "8888":
+        sub_port = default_sub
+
+    new_port = prompt(f"  订阅服务器端口 [{sub_port}] (推荐 CF HTTPS 端口): ").strip()
+    if new_port:
+        try:
+            port_int = int(new_port)
+            conflict = check_port_conflict(port_int)
+            if conflict:
+                red(f"  端口 {port_int} 已被占用: {conflict}")
+                yellow(f"  使用默认端口 {sub_port}")
+            else:
+                sub_port = new_port
+        except ValueError:
+            yellow("  端口无效，使用默认值")
+
+    db.set_config("sub_port", sub_port)
+
+    # Open firewall for subscription server
+    open_firewall_port(int(sub_port), "tcp")
+
+    # Start subscription server
+    _install_and_start_service()
+    print()
+    yellow("  HTTPS 访问设置:")
+    print(f"    1. Cloudflare DNS 添加 A 记录:")
+    print(f"       名称: admin (或 sub)  内容: {result['server_ip']}  代理: 开启 (橙色云朵)")
+    print(f"    2. 然后通过 https://admin.你的域名:{sub_port}/admin 访问")
+    print(f"    3. 也可直接用 http://{result['server_ip']}:{sub_port}/admin (无加密)")
+    print()
+
+    # ==================== Step 4: Admin Password ====================
+    print()
+    green("─" * 60)
+    green("  第 4 步: 设置管理员密码")
+    green("─" * 60)
+    print()
+    print("  管理员密码用于登录 Web 管理面板")
+    print(f"  面板地址: http://{result['server_ip']}:{sub_port}/admin")
+    print()
+
+    while True:
+        admin_pwd = prompt("  设置管理员密码 (至少6位): ").strip()
+        if not admin_pwd:
+            yellow("  已跳过，可稍后通过菜单 [15. Web 管理面板] 设置")
+            break
+        if len(admin_pwd) < 6:
+            red("  密码至少6位，请重新输入")
+            continue
+        admin_pwd2 = prompt("  确认密码: ").strip()
+        if admin_pwd != admin_pwd2:
+            red("  两次密码不一致，请重新输入")
+            continue
+        from dashboard import hash_password
+        db.set_config("admin_password", hash_password(admin_pwd))
+        green("  管理员密码已设置!")
+        break
+
+    # ==================== Step 5: USDT Payment (epusdt) ====================
+    print()
+    green("─" * 60)
+    green("  第 5 步: 部署 USDT 自动收款 (epusdt)")
+    green("─" * 60)
+    print()
+    print("  epusdt 是开源的 USDT-TRC20 收款网关")
+    print("  买家付 USDT → epusdt 检测到账 → 通知发卡平台发货")
+    print()
+    print("  需要准备:")
+    print("    - TRON 钱包收款地址 (T 开头)")
+    print("    - TRON 钱包私钥 (用于检测到账，不会转走你的币)")
+    print("    推荐用 TokenPocket 创建钱包，无需手机号")
+    print()
+    ans = prompt("  是否现在部署 epusdt？(y/N): ").strip()
+    epusdt_deployed = False
+    if ans.lower() == "y":
+        from installer import install_docker, deploy_epusdt
+        if not install_docker():
+            red("  Docker 安装失败，跳过 epusdt 部署")
+        else:
+            tron_addr = prompt("  输入 TRON 收款地址 (T开头): ").strip()
+            tron_key = prompt("  输入 TRON 钱包私钥: ").strip()
+            if tron_addr and tron_key:
+                epusdt_token = prompt("  epusdt API 密钥 (回车自动生成): ").strip()
+                if not epusdt_token:
+                    import secrets as _s
+                    epusdt_token = _s.token_hex(16)
+                if deploy_epusdt(tron_addr, tron_key, epusdt_token, result['server_ip']):
+                    db.set_config("epusdt_token", epusdt_token)
+                    epusdt_deployed = True
+                    green(f"  epusdt API 密钥: {epusdt_token}")
+                    yellow("  (已保存，配置独角数卡时会用到)")
+            else:
+                red("  地址或私钥为空，已跳过")
+    if not epusdt_deployed:
+        yellow("  已跳过，可稍后手动部署 (参考部署指南第五步)")
+
+    # ==================== Step 6: Card Platform (独角数卡) ====================
+    print()
+    green("─" * 60)
+    green("  第 6 步: 部署发卡网站 (独角数卡)")
+    green("─" * 60)
+    print()
+    print("  独角数卡是开源发卡平台，买家在这里选套餐、付款、自动收到订阅链接")
+    print()
+    ans = prompt("  是否现在部署独角数卡？(y/N): ").strip()
+    djk_deployed = False
+    if ans.lower() == "y":
+        from installer import install_docker, deploy_dujiaoka
+        if not install_docker():
+            red("  Docker 安装失败，跳过")
+        else:
+            djk_port = prompt("  发卡网站端口 [80]: ").strip()
+            djk_port = int(djk_port) if djk_port else 80
+            if deploy_dujiaoka(djk_port):
+                djk_deployed = True
+                print()
+                yellow("  独角数卡需要在浏览器中完成初始化:")
+                print(f"    1. 打开 http://{result['server_ip']}:{djk_port}")
+                print(f"    2. 按向导设置网站名称、管理员账号")
+                print(f"    3. 数据库选 SQLite")
+                print(f"    4. 安装完成后登录后台: http://{result['server_ip']}:{djk_port}/admin")
+                print()
+                yellow("  然后在后台配置支付和商品:")
+                print()
+                yellow("  配置支付 (对接 epusdt):")
+                epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
+                print(f"    后台 → 支付设置 → 添加支付方式:")
+                print(f"    名称: USDT")
+                print(f"    商户密钥: {epusdt_token}")
+                print(f"    支付网关: http://127.0.0.1:8000")
+                print()
+                yellow("  创建商品 (对接 vpn-manager API):")
+                api_secret = db.get_config("api_secret", "")
+                if not api_secret:
+                    import secrets as _s
+                    api_secret = _s.token_hex(20)
+                    db.set_config("api_secret", api_secret)
+                print(f"    后台 → 商品管理 → 添加商品:")
+                print(f"    发货方式: 第三方API发货")
+                print(f"    API 地址: http://127.0.0.1:{sub_port}/api/create")
+                print(f"    请求参数: {{\"secret\": \"{api_secret}\", \"plan_id\": 1}}")
+                print(f"    (plan_id: 1=单日¥2, 2=月卡¥15, 3=高级月卡¥25)")
+                print(f"    返回提取字段: sub_url")
+    if not djk_deployed:
+        yellow("  已跳过，可稍后手动部署 (参考部署指南第六步)")
+
+    # ==================== Final Summary ====================
+    print()
+    green("=" * 60)
+    green("  安装全部完成!")
+    green("=" * 60)
+    print()
+    print(f"  服务器 IP:      {result['server_ip']}")
+    print(f"  sing-box:       v{result['version']} (运行中)")
+    print(f"  VLESS 端口:     {result['vless_port']}")
+    if result['vmess_port']:
+        print(f"  VMess-WS 端口:  {result['vmess_port']}")
+    cf_domain = db.get_config("cf_domain", "")
+    if cf_domain:
+        print(f"  CF CDN 域名:    {cf_domain}")
+    print(f"  订阅服务端口:   {sub_port}")
+    cf_domain = db.get_config("cf_domain", "")
+    if cf_domain:
+        base_domain = cf_domain.split(".", 1)[-1] if "." in cf_domain else cf_domain
+        print(f"  管理面板:       https://admin.{base_domain}:{sub_port}/admin (CF HTTPS)")
+    print(f"  管理面板:       http://{result['server_ip']}:{sub_port}/admin (直连)")
+    if epusdt_deployed:
+        print(f"  epusdt 收款:    http://{result['server_ip']}:8000")
+    if djk_deployed:
+        print(f"  发卡网站:       http://{result['server_ip']}:{djk_port}")
+    print()
+    yellow("  常用命令:")
+    print("    vpn-manager          # 进入管理菜单")
+    print("    vpn-manager --status # 查看服务状态")
+    print()
+    green("=" * 60)
 
 
 def _show_install_result(result: dict):
@@ -436,12 +691,26 @@ def action_protocol_menu():
 
 
 def action_card_platform():
-    print("\n1. 批量生成卡密")
-    print("2. 设置 Webhook API 密钥")
-    print("3. 查看 API 配置")
-    print("0. 返回")
+    print()
+    green("  发卡平台对接")
+    print("  " + "-" * 50)
+    print("  发卡平台 (如独角数卡) 通过 API 自动创建用户:")
+    print("  买家付款 → 发卡平台调用API → vpn-manager创建用户 → 返回订阅链接")
+    print()
+    print("  1. 批量生成卡密 (导出到文件，手动导入发卡平台)")
+    print("  2. 设置 Webhook API 密钥 (发卡平台自动对接用)")
+    print("  3. 查看 API 对接说明")
+    print("  4. 部署 epusdt (USDT收款网关)")
+    print("  5. 部署独角数卡 (发卡网站)")
+    print("  0. 返回")
     c = prompt("请选择: ")
-    if c == "1":
+    if c == "4":
+        _deploy_epusdt_menu()
+        return
+    elif c == "5":
+        _deploy_dujiaoka_menu()
+        return
+    elif c == "1":
         show_plans()
         show_inventory()
         pid = prompt("\n选择套餐: ")
@@ -478,6 +747,95 @@ def action_card_platform():
         _show_api_info()
     elif c == "3":
         _show_api_info()
+
+
+def _deploy_epusdt_menu():
+    """Deploy epusdt from the card platform menu."""
+    from installer import install_docker, deploy_epusdt
+    print()
+    yellow("  部署 epusdt (USDT-TRC20 自动收款)")
+    print("  " + "-" * 50)
+    # Check Docker status
+    r = subprocess.run(["docker", "ps", "--filter", "name=epusdt", "--format", "{{.Status}}"],
+                       capture_output=True, text=True, timeout=10)
+    if r.stdout.strip():
+        green(f"  epusdt 状态: {r.stdout.strip()}")
+        ans = prompt("  是否重新部署？(y/N): ").strip()
+        if ans.lower() != "y":
+            return
+    print()
+    print("  需要 TRON 钱包信息 (推荐用 TokenPocket 创建):")
+    print("  - 收款地址: 主页 → 点 TRX → 收款 → 复制 (T开头)")
+    print("  - 私钥: 我的 → 管理钱包 → 导出私钥")
+    print()
+    tron_addr = prompt("  TRON 收款地址: ").strip()
+    tron_key = prompt("  TRON 钱包私钥: ").strip()
+    if not tron_addr or not tron_key:
+        red("  地址或私钥不能为空"); return
+    token = prompt("  API 密钥 (回车自动生成): ").strip()
+    if not token:
+        import secrets as _s
+        token = _s.token_hex(16)
+    if not install_docker():
+        red("  Docker 安装失败"); return
+    server_ip = ""
+    try:
+        server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+    except Exception:
+        pass
+    if deploy_epusdt(tron_addr, tron_key, token, server_ip):
+        db.set_config("epusdt_token", token)
+        green(f"\n  epusdt 部署成功!")
+        print(f"  API 密钥: {token}")
+        print(f"  地址: http://{server_ip}:8000")
+        yellow("\n  在独角数卡后台配置支付时填入此密钥")
+
+
+def _deploy_dujiaoka_menu():
+    """Deploy 独角数卡 from the card platform menu."""
+    from installer import install_docker, deploy_dujiaoka
+    print()
+    yellow("  部署独角数卡 (发卡网站)")
+    print("  " + "-" * 50)
+    r = subprocess.run(["docker", "ps", "--filter", "name=dujiaoka", "--format", "{{.Status}}"],
+                       capture_output=True, text=True, timeout=10)
+    if r.stdout.strip():
+        green(f"  独角数卡状态: {r.stdout.strip()}")
+        ans = prompt("  是否重新部署？(y/N): ").strip()
+        if ans.lower() != "y":
+            return
+    port = prompt("  端口 [80]: ").strip()
+    port = int(port) if port else 80
+    if not install_docker():
+        red("  Docker 安装失败"); return
+    if deploy_dujiaoka(port):
+        server_ip = ""
+        try:
+            server_ip = (SB_DIR / "server_ipcl.log").read_text().strip()
+        except Exception:
+            pass
+        sub_port = db.get_config("sub_port", "8888")
+        api_secret = db.get_config("api_secret", "")
+        if not api_secret:
+            import secrets as _s
+            api_secret = _s.token_hex(20)
+            db.set_config("api_secret", api_secret)
+        epusdt_token = db.get_config("epusdt_token", "epusdt_secret_123")
+        print()
+        green("  独角数卡部署成功!")
+        yellow(f"\n  打开 http://{server_ip}:{port} 完成网页安装向导")
+        yellow(f"  安装后登录后台: http://{server_ip}:{port}/admin")
+        print()
+        yellow("  后台配置支付 (对接 epusdt):")
+        print(f"    支付设置 → 添加 → 商户密钥: {epusdt_token}")
+        print(f"    支付网关: http://127.0.0.1:8000")
+        print()
+        yellow("  后台创建商品 (对接 vpn-manager):")
+        print(f"    发货方式: 第三方API发货")
+        print(f"    API 地址: http://127.0.0.1:{sub_port}/api/create")
+        print(f"    请求参数: {{\"secret\": \"{api_secret}\", \"plan_id\": 1}}")
+        print(f"    (plan_id: 1=单日¥2, 2=月卡¥15, 3=高级月卡¥25)")
+        print(f"    返回提取字段: sub_url")
 
 
 def _show_api_info():

@@ -12,7 +12,10 @@
       "WebFetch(domain:www.v2ex.com)",
       "Bash(cd /home/yongyan/Desktop/vpn/vpn-manager && python3 -m py_compile installer.py && echo \"OK\")",
       "Bash(python3 -m py_compile installer.py && python3 -m py_compile config.py && python3 -m py_compile singbox.py && echo \"All OK\")",
-      "Bash(python3 -m py_compile installer.py && echo \"OK\")"
+      "Bash(python3 -m py_compile installer.py && echo \"OK\")",
+      "Bash(python3 -m py_compile main.py && echo \"OK\")",
+      "Bash(python3 -m py_compile cli.py && echo \"OK\")",
+      "Bash(python3 -m py_compile cli.py && python3 -m py_compile installer.py && echo \"All OK\")"
     ]
   }
 }
